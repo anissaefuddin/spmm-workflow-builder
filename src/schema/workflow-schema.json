@@ -1,0 +1,217 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "spmm-workflow-dsl-v1",
+  "title": "SPMM Workflow DSL",
+  "description": "JSON DSL for defining SPMM workflows. Maps 1:1 to the XML Process_Definition format used by the spmm-be backend.",
+  "type": "object",
+  "required": ["version", "process"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "DSL schema version"
+    },
+    "process": {
+      "$ref": "#/definitions/WorkflowProcess"
+    }
+  },
+
+  "definitions": {
+    "WorkflowProcess": {
+      "type": "object",
+      "description": "Root process definition. Maps to <Process_Definition>.",
+      "required": ["id", "name", "roles", "variables", "steps"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Internal UUID. Not persisted in XML."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable process name. Used only in the builder UI."
+        },
+        "roleStart": {
+          "type": "string",
+          "description": "Maps to <rolestart>. The role that can initiate this process."
+        },
+        "roles": {
+          "type": "array",
+          "description": "All participating roles. Maps to <role><value>…</value></role> list.",
+          "items": { "$ref": "#/definitions/WorkflowRole" }
+        },
+        "variables": {
+          "type": "array",
+          "description": "Process-level variables. Maps to <variabel> elements.",
+          "items": { "$ref": "#/definitions/WorkflowVariable" }
+        },
+        "steps": {
+          "type": "array",
+          "description": "Ordered step definitions. Maps to <step> elements.",
+          "items": { "$ref": "#/definitions/WorkflowStep" }
+        }
+      }
+    },
+
+    "WorkflowRole": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Role name. Maps to <role><value>…</value></role>."
+        }
+      }
+    },
+
+    "WorkflowVariable": {
+      "type": "object",
+      "description": "Process variable. Maps to <variabel><name>…</name><value>…</value></variabel>.",
+      "required": ["name", "defaultValue"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Variable name. Maps to <variabel><name>."
+        },
+        "defaultValue": {
+          "type": "string",
+          "description": "Initial value. Maps to <variabel><value>. Can be empty string."
+        }
+      }
+    },
+
+    "WorkflowStep": {
+      "oneOf": [
+        { "$ref": "#/definitions/FormStep" },
+        { "$ref": "#/definitions/DecisionUserStep" },
+        { "$ref": "#/definitions/DecisionSistemStep" },
+        { "$ref": "#/definitions/EndStep" }
+      ]
+    },
+
+    "StepTransitions": {
+      "type": "object",
+      "description": "Step navigation targets. Maps to <steptrue>, <stepfalse>, <steprollback>.",
+      "properties": {
+        "true": {
+          "type": "integer",
+          "description": "Next step number when condition is true / user approves. Maps to <steptrue>."
+        },
+        "false": {
+          "type": "integer",
+          "description": "Next step number when condition is false / user rejects. Maps to <stepfalse>."
+        },
+        "rollback": {
+          "type": "integer",
+          "description": "Explicit rollback target step number. Maps to <steprollback>."
+        }
+      }
+    },
+
+    "FormStep": {
+      "type": "object",
+      "description": "User fills a form. Maps to <step><type>form</type>…</step>.",
+      "required": ["id", "number", "type", "formFields", "formData", "transitions"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "number": {
+          "type": "integer",
+          "description": "Step number. Maps to <number>."
+        },
+        "type": { "type": "string", "const": "form" },
+        "role": {
+          "type": "string",
+          "description": "Assigned role. Maps to <role>."
+        },
+        "tahap": {
+          "type": "string",
+          "description": "Stage label extracted from form_data JSON's 'tahap' key."
+        },
+        "formFields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of variable names visible in this form (excluding 'tahap')."
+        },
+        "formData": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Raw field→default map from <form_data> JSON."
+        },
+        "transitions": { "$ref": "#/definitions/StepTransitions" }
+      }
+    },
+
+    "DecisionUserStep": {
+      "type": "object",
+      "description": "Human approval decision. Maps to <step><type>decision_user</type>…</step>.",
+      "required": ["id", "number", "type", "rule", "viewFields", "decisionKey", "transitions"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "number": { "type": "integer" },
+        "type": { "type": "string", "const": "decision_user" },
+        "role": {
+          "type": "string",
+          "description": "Role that makes this decision. Maps to <role>."
+        },
+        "rule": {
+          "type": "string",
+          "description": "Decision question text. Extracted from decision_key JSON's 'rule' key."
+        },
+        "viewFields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Variables displayed to the reviewer for context (excludes 'rule')."
+        },
+        "decisionKey": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Raw map from <decision_key> JSON."
+        },
+        "transitions": { "$ref": "#/definitions/StepTransitions" }
+      }
+    },
+
+    "DecisionSistemStep": {
+      "type": "object",
+      "description": "Automated variable comparison. Maps to <step><type>decision_sistem</type>…</step>.",
+      "required": ["id", "number", "type", "condition", "transitions"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "number": { "type": "integer" },
+        "type": { "type": "string", "const": "decision_sistem" },
+        "condition": {
+          "type": "object",
+          "required": ["variableA", "operator", "variableB"],
+          "properties": {
+            "variableA": {
+              "type": "string",
+              "description": "Left operand. Maps to <variabela>."
+            },
+            "operator": {
+              "type": "string",
+              "enum": [">", "<", ">=", "<=", "==", "!="],
+              "description": "Comparison operator. Maps to <operator>."
+            },
+            "variableB": {
+              "type": "string",
+              "description": "Right operand. Maps to <variabelb>."
+            }
+          }
+        },
+        "transitions": { "$ref": "#/definitions/StepTransitions" }
+      }
+    },
+
+    "EndStep": {
+      "type": "object",
+      "description": "Workflow termination. Maps to <step><type>end</type>…</step>.",
+      "required": ["id", "number", "type", "transitions"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "number": { "type": "integer" },
+        "type": { "type": "string", "const": "end" },
+        "transitions": { "$ref": "#/definitions/StepTransitions" }
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ReactFlow overrides */
+.react-flow__attribution {
+  background: transparent !important;
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid white;
+}
+
+/* Monitor: pulse ring on the active live step */
+.monitor-active-node > div {
+  box-shadow: 0 0 0 3px #3b82f6, 0 0 12px 4px #93c5fd;
+  animation: monitor-pulse 1.5s ease-in-out infinite;
+}
+@keyframes monitor-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px #3b82f6, 0 0 8px 2px #93c5fd; }
+  50%       { box-shadow: 0 0 0 5px #3b82f6, 0 0 16px 6px #bfdbfe; }
+}
