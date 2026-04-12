@@ -120,3 +120,24 @@ export async function getDefinitionXml(id: string): Promise<ApiResult<{
 export async function getMonitorSummary(): Promise<ApiResult<MonitorSummary>> {
   return apiGet('/monitor/summary')
 }
+
+// ── Variable schema endpoint ────────────────────────────────
+
+export interface VariableSchemaField {
+  name: string
+  type: string
+  required: boolean
+  description?: string
+}
+
+/**
+ * GET /variable-schema/{vtype}
+ * Optional endpoint — returns the internal field schema for a custom variable type.
+ * Falls back gracefully when the endpoint doesn't exist.
+ */
+export async function getVariableSchema(vtype: string): Promise<ApiResult<{
+  vtype: string
+  fields: VariableSchemaField[]
+}>> {
+  return apiGet(`/variable-schema/${encodeURIComponent(vtype)}`)
+}

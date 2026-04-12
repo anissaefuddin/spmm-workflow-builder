@@ -32,7 +32,7 @@ export function Sidebar() {
   const tab = selectedStep ? (STEP_TAB[selectedStep.type] ?? STEP_TAB.end) : null
 
   return (
-    <aside className="w-80 bg-white border-l border-gray-200 flex flex-col overflow-hidden">
+    <aside className="w-full h-full bg-white border-l border-gray-200 flex flex-col overflow-hidden">
 
       {/* ── Tabs ────────────────────────────────────────────── */}
       <div className="flex border-b border-gray-200 shrink-0">

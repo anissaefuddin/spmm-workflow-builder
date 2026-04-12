@@ -101,6 +101,8 @@ export function FormBuilder() {
 
 // ── VtypeBadge ────────────────────────────────────────────────
 
+const VTYPES_STANDARD = ['String', 'Number', 'float', 'Date', 'Option', 'file']
+
 const VTYPE_COLORS: Record<string, string> = {
   String:  'bg-blue-100 text-blue-700',
   Number:  'bg-green-100 text-green-700',
@@ -111,10 +113,22 @@ const VTYPE_COLORS: Record<string, string> = {
 }
 
 function VtypeBadge({ vtype }: { vtype: string }) {
+  const isCustom = !VTYPES_STANDARD.includes(vtype)
+  if (isCustom) {
+    return (
+      <span
+        className="text-xs px-1.5 py-0.5 rounded font-mono font-medium bg-indigo-100 text-indigo-700 flex items-center gap-0.5"
+        title={vtype}
+      >
+        <span>◈</span>
+        <span className="max-w-[64px] truncate">{vtype}</span>
+      </span>
+    )
+  }
   const cls = VTYPE_COLORS[vtype] ?? 'bg-gray-100 text-gray-600'
   return (
     <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-medium ${cls}`}>
-      {vtype.length > 8 ? vtype.slice(0, 7) + '…' : vtype}
+      {vtype}
     </span>
   )
 }

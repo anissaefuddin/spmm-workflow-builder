@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Toolbar } from './components/Toolbar'
 import { WorkflowCanvas } from './components/WorkflowCanvas'
 import { Sidebar } from './components/Sidebar'
@@ -10,12 +10,63 @@ import { useWorkflowStore } from './store/workflow-store'
 
 type LeftTab = 'dashboard' | 'canvas' | 'variables' | 'monitor'
 
+const MIN_SIDEBAR = 280
+const MAX_SIDEBAR = 600
+
 export default function App() {
   const dsl                  = useWorkflowStore((s) => s.dsl)
   const activeDefinitionId   = useWorkflowStore((s) => s.activeDefinitionId)
   const [leftTab, setLeftTab]         = useState<LeftTab>('dashboard')
   const [monitorHighlight, setMonitorHighlight] = useState<number | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+
+  // ── Resizable sidebar ──────────────────────────────────────
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = localStorage.getItem('spmm-sidebar-width')
+    if (saved) {
+      const n = parseInt(saved, 10)
+      if (!isNaN(n)) return Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, n))
+    }
+    return 320
+  })
+  const isResizing  = useRef(false)
+  const startX      = useRef(0)
+  const startW      = useRef(0)
+  const currentW    = useRef(sidebarWidth)
+  useEffect(() => { currentW.current = sidebarWidth }, [sidebarWidth])
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!isResizing.current) return
+      // Drag handle is on the LEFT edge of the sidebar — moving left widens it
+      const delta = startX.current - e.clientX
+      const w = Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, startW.current + delta))
+      setSidebarWidth(w)
+      currentW.current = w
+    }
+    const onUp = () => {
+      if (!isResizing.current) return
+      isResizing.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      localStorage.setItem('spmm-sidebar-width', String(currentW.current))
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    return () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  const startResize = (e: React.MouseEvent) => {
+    isResizing.current = true
+    startX.current     = e.clientX
+    startW.current     = sidebarWidth
+    document.body.style.cursor    = 'col-resize'
+    document.body.style.userSelect = 'none'
+    e.preventDefault()
+  }
 
   const tabs: { id: LeftTab; label: string; dot?: string }[] = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -63,8 +114,20 @@ export default function App() {
           )}
         </div>
 
-        {/* Right sidebar — only on canvas tab with workflow loaded */}
-        {dsl && leftTab === 'canvas' && <Sidebar />}
+        {/* Right sidebar — resizable, only on canvas tab with workflow loaded */}
+        {dsl && leftTab === 'canvas' && (
+          <>
+            {/* Drag handle */}
+            <div
+              onMouseDown={startResize}
+              className="w-1.5 shrink-0 cursor-col-resize bg-gray-200 hover:bg-blue-400 active:bg-blue-500 transition-colors"
+              title="Drag to resize panel"
+            />
+            <div style={{ width: sidebarWidth }} className="shrink-0 flex flex-col overflow-hidden">
+              <Sidebar />
+            </div>
+          </>
+        )}
       </div>
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}

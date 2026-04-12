@@ -2,7 +2,7 @@
  * MonitoringPage — Full monitoring with ticket list + detail.
  * READ ONLY for most data; allows status update via safe adapter endpoint.
  */
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { listTickets, monitorInstance, updateTicketStatus } from '../services/api'
 import { useSettingsStore } from '../store/settings-store'
 import { useWorkflowListStore } from '../store/workflow-list-store'
@@ -155,6 +155,9 @@ function TicketList({
   // Local workflow dropdown — initialised from prop, overrideable by user
   const [selectedDefId, setSelectedDefId] = useState<string>(definitionId ?? '')
 
+  // Request-id guard — prevents stale API responses from overwriting newer results
+  const reqId = useRef(0)
+
   const PAGE_SIZE = 20
 
   // Sync dropdown when the external prop changes (e.g. user loads a workflow)
@@ -172,6 +175,9 @@ function TicketList({
       setError('No Backend URL — open Settings to configure')
       return
     }
+    // Bump the request counter and capture this call's id.
+    // If a newer request completes first, we discard this stale result.
+    const thisId = ++reqId.current
     setLoading(true)
     setError(null)
     const res = await listTickets({
@@ -181,6 +187,7 @@ function TicketList({
       status: filterStatus || undefined,
       definitionId: selectedDefId || undefined,
     })
+    if (reqId.current !== thisId) return  // stale — a newer request is in flight
     setLoading(false)
     if (res.ok) {
       setTickets(res.data.content)
