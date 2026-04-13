@@ -6,7 +6,7 @@ export interface TaskHistoryItem {
   stepTitle: string
   role: string
   claimBy: string
-  status: 'PENDING' | 'COMPLETED' | 'CANCELLED'
+  status: 'PENDING' | 'COMPLETED' | 'CANCELLED' | 'NOT_STARTED'
   createdAt: string | null
   completedAt: string | null
   catatan: string | null

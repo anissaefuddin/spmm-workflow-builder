@@ -9,6 +9,9 @@ import { useSettingsStore } from '../../store/settings-store'
 import { getVariableSchema } from '../../services/api'
 import type { VariableSchemaField } from '../../services/api'
 import type { WorkflowVariable } from '../../types/workflow'
+import { VariableUsageTracker } from './VariableUsageTracker'
+import { analyzeVariableRemoval, hasImpact } from '../../lib/impact-analysis'
+import { ImpactModal } from '../panels/ImpactModal'
 
 interface Props {
   variable: WorkflowVariable
@@ -190,9 +193,21 @@ function CustomTypeInspector({
 
 export function VariableEditor({ variable: v }: Props) {
   const { updateVariable, removeVariable } = useWorkflowStore()
+  const dsl = useWorkflowStore((s) => s.dsl)
+  const [impactReport, setImpactReport] = useState<ReturnType<typeof analyzeVariableRemoval> | null>(null)
   const patch = (p: Partial<WorkflowVariable>) => updateVariable(v.name, p)
 
   const isCustomType = !STANDARD_VTYPES.includes(v.vtype)
+
+  const handleRemove = () => {
+    if (!dsl) { removeVariable(v.name); return }
+    const report = analyzeVariableRemoval(v.name, dsl)
+    if (hasImpact(report)) {
+      setImpactReport(report)
+    } else {
+      removeVariable(v.name)
+    }
+  }
 
   return (
     <div className="space-y-2 pt-2">
@@ -287,13 +302,24 @@ export function VariableEditor({ variable: v }: Props) {
         <label htmlFor={`req-${v.name}`} className="text-xs text-gray-600">Required field</label>
       </div>
 
-      {/* Delete */}
+      {/* Usage tracker — shows which steps reference this variable */}
+      <VariableUsageTracker variableName={v.name} />
+
+      {/* Delete (with impact analysis guard) */}
       <button
-        onClick={() => removeVariable(v.name)}
+        onClick={handleRemove}
         className="w-full mt-1 bg-red-50 border border-red-200 text-red-600 rounded px-3 py-1 text-xs hover:bg-red-100"
       >
         Remove Variable
       </button>
+
+      {impactReport && (
+        <ImpactModal
+          report={impactReport}
+          onConfirm={() => { removeVariable(v.name); setImpactReport(null) }}
+          onCancel={() => setImpactReport(null)}
+        />
+      )}
     </div>
   )
 }

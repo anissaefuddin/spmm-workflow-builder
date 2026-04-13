@@ -6,6 +6,7 @@ import { FormBuilder } from './components/FormBuilder/FormBuilder'
 import { MonitoringPage } from './pages/MonitoringPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { SettingsModal } from './components/settings/SettingsModal'
+import { VariableFlowPanel } from './components/panels/VariableFlowPanel'
 import { useWorkflowStore } from './store/workflow-store'
 
 type LeftTab = 'dashboard' | 'canvas' | 'variables' | 'monitor'
@@ -19,6 +20,7 @@ export default function App() {
   const [leftTab, setLeftTab]         = useState<LeftTab>('dashboard')
   const [monitorHighlight, setMonitorHighlight] = useState<number | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showVarFlow, setShowVarFlow]   = useState(false)
 
   // ── Resizable sidebar ──────────────────────────────────────
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -79,7 +81,11 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-50 overflow-hidden">
-      <Toolbar onOpenSettings={() => setShowSettings(true)} activeTab={leftTab} />
+      <Toolbar
+        onOpenSettings={() => setShowSettings(true)}
+        activeTab={leftTab}
+        onOpenVarFlow={() => setShowVarFlow(true)}
+      />
 
       {/* Tab bar */}
       <div className="flex border-b border-gray-200 bg-white px-4 gap-1 flex-shrink-0">
@@ -131,6 +137,9 @@ export default function App() {
       </div>
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showVarFlow && dsl && (
+        <VariableFlowPanel onClose={() => setShowVarFlow(false)} />
+      )}
     </div>
   )
 }

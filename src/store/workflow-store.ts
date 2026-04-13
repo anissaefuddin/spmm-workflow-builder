@@ -4,7 +4,6 @@ import type {
   WorkflowDSL,
   WorkflowStep,
   WorkflowVariable,
-  WorkflowRole,
   FormStep,
   DecisionUserStep,
   DecisionSistemStep,
@@ -12,21 +11,20 @@ import type {
   EndStep,
 } from '../types/workflow'
 
+const MAX_HISTORY = 50
+
 interface WorkflowState {
   dsl: WorkflowDSL | null
   selectedStepId: string | null
-  /** Backend draft ID — set when this DSL was loaded from / saved to the backend */
   draftId: string | null
-  /** Source type: 'local' | 'draft' | 'definition' */
   draftSource: 'local' | 'draft' | 'definition' | null
-  /**
-   * The wf_process_definition ID that corresponds to this workflow.
-   * Used to filter monitoring tickets by workflow.
-   * - definition source: equals the definition id
-   * - draft source: equals publishedDefinitionId (if published)
-   * - local / unpublished: null
-   */
   activeDefinitionId: string | null
+
+  // ── History (local only — never persisted) ──────────────
+  _past: WorkflowDSL[]
+  _future: WorkflowDSL[]
+  canUndo: boolean
+  canRedo: boolean
 
   // Actions
   loadDSL: (dsl: WorkflowDSL) => void
@@ -39,6 +37,10 @@ interface WorkflowState {
   resetDSL: () => void
   setDraftId: (id: string | null) => void
   selectStep: (id: string | null) => void
+
+  // History
+  undo: () => void
+  redo: () => void
 
   // Process-level mutations
   setProcessName: (name: string) => void
@@ -92,94 +94,146 @@ function nextStepNumber(dsl: WorkflowDSL): number {
   return Math.max(...dsl.process.steps.map((s) => s.number)) + 1
 }
 
+// ── History helper ────────────────────────────────────────────
+// Captures current DSL into _past, sets new DSL, clears _future.
+
+type SetFn = (fn: (s: WorkflowState) => Partial<WorkflowState>) => void
+
+function withHistory(set: SetFn, producer: (dsl: WorkflowDSL) => WorkflowDSL | null) {
+  set((s) => {
+    if (!s.dsl) return s
+    const next = producer(s.dsl)
+    if (!next || next === s.dsl) return s
+    const past = [...s._past, s.dsl].slice(-MAX_HISTORY)
+    return {
+      dsl: next,
+      _past: past,
+      _future: [],
+      canUndo: true,
+      canRedo: false,
+    }
+  })
+}
+
 export const useWorkflowStore = create<WorkflowState>((set) => ({
   dsl: null,
   selectedStepId: null,
   draftId: null,
   draftSource: null,
   activeDefinitionId: null,
+  _past: [],
+  _future: [],
+  canUndo: false,
+  canRedo: false,
+
+  // ── Load / Reset (resets history) ───────────────────────────
 
   loadDSL: (dsl) => set({
     dsl, selectedStepId: null, draftId: null, draftSource: 'local', activeDefinitionId: null,
+    _past: [], _future: [], canUndo: false, canRedo: false,
   }),
 
   loadDSLFromBackend: (dsl, draftId, source = 'draft', definitionId = null) =>
-    set({ dsl, selectedStepId: null, draftId, draftSource: source, activeDefinitionId: definitionId }),
+    set({
+      dsl, selectedStepId: null, draftId, draftSource: source, activeDefinitionId: definitionId,
+      _past: [], _future: [], canUndo: false, canRedo: false,
+    }),
 
   resetDSL: () => set({
     dsl: makeEmptyDSL(), selectedStepId: null, draftId: null, draftSource: 'local', activeDefinitionId: null,
+    _past: [], _future: [], canUndo: false, canRedo: false,
   }),
 
   setDraftId: (id) => set({ draftId: id }),
 
   selectStep: (id) => set({ selectedStepId: id }),
 
+  // ── Undo / Redo ─────────────────────────────────────────────
+
+  undo: () =>
+    set((s) => {
+      if (s._past.length === 0 || !s.dsl) return s
+      const prev = s._past[s._past.length - 1]
+      return {
+        dsl: prev,
+        _past: s._past.slice(0, -1),
+        _future: [s.dsl, ...s._future].slice(0, MAX_HISTORY),
+        canUndo: s._past.length > 1,
+        canRedo: true,
+      }
+    }),
+
+  redo: () =>
+    set((s) => {
+      if (s._future.length === 0 || !s.dsl) return s
+      const next = s._future[0]
+      return {
+        dsl: next,
+        _past: [...s._past, s.dsl].slice(-MAX_HISTORY),
+        _future: s._future.slice(1),
+        canUndo: true,
+        canRedo: s._future.length > 1,
+      }
+    }),
+
+  // ── Process-level mutations (with history) ──────────────────
+
   setProcessName: (name) =>
-    set((s) => s.dsl ? { dsl: { ...s.dsl, process: { ...s.dsl.process, name } } } : s),
+    withHistory(set, (dsl) => ({ ...dsl, process: { ...dsl.process, name } })),
 
   setRoleStart: (role) =>
-    set((s) => s.dsl ? { dsl: { ...s.dsl, process: { ...s.dsl.process, roleStart: role } } } : s),
+    withHistory(set, (dsl) => ({ ...dsl, process: { ...dsl.process, roleStart: role } })),
+
+  // ── Role mutations ──────────────────────────────────────────
 
   addRole: (name) =>
-    set((s) => {
-      if (!s.dsl) return s
-      if (s.dsl.process.roles.some((r) => r.name === name)) return s
-      return { dsl: { ...s.dsl, process: { ...s.dsl.process, roles: [...s.dsl.process.roles, { name }] } } }
+    withHistory(set, (dsl) => {
+      if (dsl.process.roles.some((r) => r.name === name)) return null
+      return { ...dsl, process: { ...dsl.process, roles: [...dsl.process.roles, { name }] } }
     }),
 
   removeRole: (name) =>
-    set((s) => {
-      if (!s.dsl) return s
-      return { dsl: { ...s.dsl, process: { ...s.dsl.process, roles: s.dsl.process.roles.filter((r) => r.name !== name) } } }
-    }),
+    withHistory(set, (dsl) => ({
+      ...dsl, process: { ...dsl.process, roles: dsl.process.roles.filter((r) => r.name !== name) },
+    })),
+
+  // ── Variable mutations ──────────────────────────────────────
 
   addVariable: (name, defaultValue = '') =>
-    set((s) => {
-      if (!s.dsl) return s
-      if (s.dsl.process.variables.some((v) => v.name === name)) return s
+    withHistory(set, (dsl) => {
+      if (dsl.process.variables.some((v) => v.name === name)) return null
       return {
-        dsl: {
-          ...s.dsl,
-          process: {
-            ...s.dsl.process,
-            variables: [...s.dsl.process.variables, { name, value1: defaultValue, defaultValue, vtype: 'String' }],
-          },
+        ...dsl,
+        process: {
+          ...dsl.process,
+          variables: [...dsl.process.variables, { name, value1: defaultValue, defaultValue, vtype: 'String' }],
         },
       }
     }),
 
   updateVariable: (name, patch) =>
-    set((s) => {
-      if (!s.dsl) return s
-      return {
-        dsl: {
-          ...s.dsl,
-          process: {
-            ...s.dsl.process,
-            variables: s.dsl.process.variables.map((v) => v.name === name ? { ...v, ...patch } : v),
-          },
-        },
-      }
-    }),
+    withHistory(set, (dsl) => ({
+      ...dsl,
+      process: {
+        ...dsl.process,
+        variables: dsl.process.variables.map((v) => v.name === name ? { ...v, ...patch } : v),
+      },
+    })),
 
   removeVariable: (name) =>
-    set((s) => {
-      if (!s.dsl) return s
-      return {
-        dsl: {
-          ...s.dsl,
-          process: {
-            ...s.dsl.process,
-            variables: s.dsl.process.variables.filter((v) => v.name !== name),
-          },
-        },
-      }
-    }),
+    withHistory(set, (dsl) => ({
+      ...dsl,
+      process: {
+        ...dsl.process,
+        variables: dsl.process.variables.filter((v) => v.name !== name),
+      },
+    })),
+
+  // ── Step mutations ──────────────────────────────────────────
 
   addStep: (type) =>
-    set((s) => {
-      if (!s.dsl) return s
-      const number = nextStepNumber(s.dsl)
+    withHistory(set, (dsl) => {
+      const number = nextStepNumber(dsl)
       let newStep: WorkflowStep
       if (type === 'form') {
         newStep = { id: uuidv4(), number, type: 'form', formFields: [], formData: {}, transitions: {} } satisfies FormStep
@@ -192,31 +246,21 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
       } else {
         newStep = { id: uuidv4(), number, type: 'end', transitions: {} } satisfies EndStep
       }
-      return { dsl: { ...s.dsl, process: { ...s.dsl.process, steps: [...s.dsl.process.steps, newStep] } } }
+      return { ...dsl, process: { ...dsl.process, steps: [...dsl.process.steps, newStep] } }
     }),
 
   updateStep: (id, patch) =>
-    set((s) => {
-      if (!s.dsl) return s
-      return {
-        dsl: {
-          ...s.dsl,
-          process: {
-            ...s.dsl.process,
-            steps: s.dsl.process.steps.map((step) => step.id === id ? ({ ...step, ...patch } as WorkflowStep) : step),
-          },
-        },
-      }
-    }),
+    withHistory(set, (dsl) => ({
+      ...dsl,
+      process: {
+        ...dsl.process,
+        steps: dsl.process.steps.map((step) => step.id === id ? ({ ...step, ...patch } as WorkflowStep) : step),
+      },
+    })),
 
   removeStep: (id) =>
-    set((s) => {
-      if (!s.dsl) return s
-      return {
-        dsl: {
-          ...s.dsl,
-          process: { ...s.dsl.process, steps: s.dsl.process.steps.filter((step) => step.id !== id) },
-        },
-      }
-    }),
+    withHistory(set, (dsl) => ({
+      ...dsl,
+      process: { ...dsl.process, steps: dsl.process.steps.filter((step) => step.id !== id) },
+    })),
 }))

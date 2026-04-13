@@ -151,6 +151,24 @@ export type WorkflowStep =
   | SystemActionStep
   | EndStep
 
+// ── Role Config (from wf_role_matrix) ────────────────────────
+export interface RoleConfigEntry {
+  roleCode: string
+  hideDraft: boolean
+  requireClaimBy: boolean
+  lembagaRequired: boolean
+  title?: string
+}
+
+// ── Button Map (from wf_button_map) ──────────────────────────
+export interface ButtonMapEntry {
+  roleCode: string
+  buttonLabel: string
+  buttonUrl: string
+  stepCondition?: string
+  stepInquiry?: string
+}
+
 // ── Process (root) ────────────────────────────────────────────
 export interface WorkflowProcess {
   id: string
@@ -160,6 +178,10 @@ export interface WorkflowProcess {
   listGrup: ListGrup[]          // <listgrup> elements
   variables: WorkflowVariable[]
   steps: WorkflowStep[]
+
+  // ── Optional DB enrichment (NOT serialized to XML) ─────────
+  roleConfig?: RoleConfigEntry[]    // from wf_role_matrix
+  buttonMap?: ButtonMapEntry[]      // from wf_button_map
 }
 
 // ── Root DSL ──────────────────────────────────────────────────

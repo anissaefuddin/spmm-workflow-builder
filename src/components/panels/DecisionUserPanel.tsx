@@ -5,6 +5,7 @@ import { TransitionEditor } from './TransitionEditor'
 import { DecisionKeyEditor } from './DecisionKeyEditor'
 import { StepValidation } from './StepValidation'
 import { VariablePicker } from './VariablePicker'
+import { ButtonMapEditor } from './ButtonMapEditor'
 
 interface Props { step: DecisionUserStep }
 
@@ -77,6 +78,9 @@ export function DecisionUserPanel({ step }: Props) {
           />
         </div>
       </div>
+
+      {/* ── Button Config (wf_button_map) ───────────────────── */}
+      <ButtonMapEditor stepNumber={step.number} />
 
       {/* ── Shared metadata ──────────────────────────────────── */}
       <StepMetaFields step={step} />

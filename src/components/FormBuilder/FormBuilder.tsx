@@ -7,24 +7,35 @@ import { useState } from 'react'
 import { useWorkflowStore } from '../../store/workflow-store'
 import type { WorkflowVariable } from '../../types/workflow'
 import { VariableEditor } from './VariableEditor'
+import { CustomVariableManager } from './CustomVariableManager'
+
+type SubTab = 'variables' | 'custom-types'
 
 export function FormBuilder() {
   const { dsl, addVariable } = useWorkflowStore()
   const [newName, setNewName]   = useState('')
   const [newVtype, setNewVtype] = useState('String')
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [subTab, setSubTab]     = useState<SubTab>('variables')
 
   if (!dsl) return null
   const { variables } = dsl.process
 
   const VTYPES = ['String', 'Number', 'float', 'Date', 'Option', 'file']
 
+  // Custom Types sub-tab
+  if (subTab === 'custom-types') {
+    return (
+      <div className="flex flex-col h-full">
+        <SubTabs active={subTab} onChange={setSubTab} varCount={variables.length} />
+        <CustomVariableManager />
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-        <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wide">Variables</h3>
-        <p className="text-xs text-gray-400 mt-0.5">{variables.length} declared</p>
-      </div>
+      <SubTabs active={subTab} onChange={setSubTab} varCount={variables.length} />
 
       {/* Variable list */}
       <div className="flex-1 overflow-y-auto">
@@ -130,5 +141,36 @@ function VtypeBadge({ vtype }: { vtype: string }) {
     <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-medium ${cls}`}>
       {vtype}
     </span>
+  )
+}
+
+// ── Sub-tab switcher ──────────────────────────────────────────
+
+function SubTabs({
+  active, onChange, varCount,
+}: {
+  active: SubTab; onChange: (t: SubTab) => void; varCount: number
+}) {
+  return (
+    <div className="flex border-b border-gray-200 bg-gray-50 shrink-0">
+      <button
+        onClick={() => onChange('variables')}
+        className={`flex-1 py-2 text-xs font-semibold uppercase tracking-wide transition-colors
+          ${active === 'variables'
+            ? 'text-blue-600 border-b-2 border-blue-500 bg-white'
+            : 'text-gray-500 hover:text-gray-700'}`}
+      >
+        Variables ({varCount})
+      </button>
+      <button
+        onClick={() => onChange('custom-types')}
+        className={`flex-1 py-2 text-xs font-semibold uppercase tracking-wide transition-colors
+          ${active === 'custom-types'
+            ? 'text-indigo-600 border-b-2 border-indigo-500 bg-white'
+            : 'text-gray-500 hover:text-gray-700'}`}
+      >
+        ◈ Custom Types
+      </button>
+    </div>
   )
 }

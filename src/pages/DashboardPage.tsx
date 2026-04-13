@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useWorkflowStore } from '../store/workflow-store'
 import { useWorkflowListStore } from '../store/workflow-list-store'
 import { useSettingsStore } from '../store/settings-store'
-import { getDraft, getDefinitionXml } from '../services/api'
+import { getDraft, getDefinitionXml, getRoleConfig, getButtonMap } from '../services/api'
 import { parseXmlToJson } from '../services/workflowXmlParser'
 import type { WorkflowDSL, WorkflowStep } from '../types/workflow'
 import type { DraftListItem, DefinitionListItem } from '../types/workflow-list'
@@ -176,8 +176,17 @@ export function DashboardPage({ onNavigate }: { onNavigate?: (tab: string) => vo
     const parsed = parseXmlToJson(res.data.xml, { processName: item.name })
     if (!parsed.ok) { setLoadError(`XML parse error: ${parsed.error}`); return }
 
+    // Enrich DSL with role config + button map from DB (best-effort, parallel)
+    const dsl = parsed.data
+    const [rolesRes, buttonsRes] = await Promise.all([
+      getRoleConfig(item.id),
+      getButtonMap(item.id),
+    ])
+    if (rolesRes.ok && rolesRes.data.length > 0)   dsl.process.roleConfig = rolesRes.data
+    if (buttonsRes.ok && buttonsRes.data.length > 0) dsl.process.buttonMap = buttonsRes.data
+
     // Use definitionId as the draftId placeholder so Save will create a NEW draft
-    loadDSLFromBackend(parsed.data, item.id, 'definition', item.id)
+    loadDSLFromBackend(dsl, item.id, 'definition', item.id)
     onNavigate?.('canvas')
   }
 

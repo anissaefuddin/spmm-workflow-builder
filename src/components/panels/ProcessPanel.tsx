@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useWorkflowStore } from '../../store/workflow-store'
+import { RoleConfigPanel } from './RoleConfigPanel'
 
 export function ProcessPanel() {
   const { dsl, setProcessName, setRoleStart, addRole, removeRole, addVariable, removeVariable, updateVariable } =
@@ -76,6 +77,14 @@ export function ProcessPanel() {
           </button>
         </div>
       </div>
+
+      {/* Role Config — behavior flags per role */}
+      {process.roles.length > 0 && (
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">Role Configuration</label>
+          <RoleConfigPanel />
+        </div>
+      )}
 
       {/* Variables */}
       <div>

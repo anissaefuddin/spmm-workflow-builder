@@ -1,25 +1,40 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import { useWorkflowStore } from '../store/workflow-store'
 import { useWorkflowListStore } from '../store/workflow-list-store'
 import { useSettingsStore } from '../store/settings-store'
 import { parseXmlToJson } from '../services/workflowXmlParser'
 import { generateXmlFromJson } from '../services/workflowXmlGenerator'
-import { saveDraft } from '../services/api'
+import { saveDraft, saveRoleConfig, saveButtonMap } from '../services/api'
 import type { StepType } from '../types/workflow'
 
 interface ToolbarProps {
   onOpenSettings?: () => void
   /** Current active tab — used to disable context-inappropriate buttons */
   activeTab?: string
+  /** Open variable flow analysis panel */
+  onOpenVarFlow?: () => void
 }
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
-  const { dsl, loadDSL, resetDSL, addStep, draftId, setDraftId } = useWorkflowStore()
+export function Toolbar({ onOpenSettings, activeTab, onOpenVarFlow }: ToolbarProps) {
+  const { dsl, loadDSL, resetDSL, addStep, draftId, setDraftId, undo, redo, canUndo, canRedo } = useWorkflowStore()
   const fetchAll = useWorkflowListStore((s) => s.fetchAll)
   const backendUrl = useSettingsStore((s) => s.backendUrl)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // ── Keyboard shortcuts: Ctrl+Z / Ctrl+Shift+Z ──────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [undo, redo])
 
   const [error, setError]       = useState<string | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
@@ -71,7 +86,7 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
     )
   }
 
-  const handleSave = async () => {
+  const handleSave = async (publish = false) => {
     if (!dsl || !backendUrl) return
     setSaveState('saving')
     setSaveMsg('')
@@ -79,13 +94,21 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
       draftId: draftId ?? undefined,
       name:    dsl.process.name,
       dsl,
+      publish,
     })
     if (res.ok) {
       const newId = res.data.draftId
       setDraftId(newId)
+
+      // Sync role config + button map on publish
+      const defId = res.data.publishedDefinitionId
+      if (publish && defId) {
+        if (dsl.process.roleConfig?.length)  void saveRoleConfig(defId, dsl.process.roleConfig)
+        if (dsl.process.buttonMap?.length)   void saveButtonMap(defId, dsl.process.buttonMap)
+      }
+
       setSaveState('saved')
-      setSaveMsg(`Saved · ${newId.slice(0, 8)}…`)
-      // Refresh the list in background so Dashboard stays current
+      setSaveMsg(publish ? `Published · ${(defId ?? newId).slice(0, 8)}…` : `Saved · ${newId.slice(0, 8)}…`)
       void fetchAll()
       setTimeout(() => setSaveState('idle'), 3000)
     } else {
@@ -116,6 +139,29 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
           </div>
           <span className="font-bold text-gray-800 text-sm">SPMM Workflow Builder</span>
         </div>
+
+        {/* Undo / Redo */}
+        {dsl && (
+          <>
+            <div className="w-px h-6 bg-gray-200" />
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+              className="px-2 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              ↩
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Shift+Z)"
+              className="px-2 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              ↪
+            </button>
+          </>
+        )}
 
         <div className="w-px h-6 bg-gray-200" />
 
@@ -159,6 +205,16 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
         >
           {showJson ? 'Hide JSON' : 'View JSON'}
         </button>
+        {dsl && (
+          <button
+            onClick={onOpenVarFlow}
+            disabled={!canEdit}
+            title={!canEdit ? editTitle : 'Variable flow analysis — see which steps use which variables'}
+            className="px-3 py-1.5 text-sm border border-purple-300 rounded hover:bg-purple-50 text-purple-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Var Flow
+          </button>
+        )}
 
         {/* Save to backend */}
         {dsl && backendUrl && (
@@ -166,7 +222,7 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
             <div className="w-px h-6 bg-gray-200" />
             <div className="flex items-center gap-2">
               <button
-                onClick={handleSave}
+                onClick={() => handleSave(false)}
                 disabled={saveState === 'saving'}
                 className={`px-3 py-1.5 text-sm rounded font-medium transition-colors disabled:opacity-40
                   ${saveState === 'saved' ? 'bg-green-600 text-white'
@@ -176,6 +232,14 @@ export function Toolbar({ onOpenSettings, activeTab }: ToolbarProps) {
                 {saveState === 'saving' ? 'Saving…'
                  : saveState === 'saved' ? 'Saved ✓'
                  : draftId ? 'Update' : 'Save'}
+              </button>
+              <button
+                onClick={() => { if (window.confirm('Publish workflow? This will create a live process definition.')) handleSave(true) }}
+                disabled={saveState === 'saving'}
+                className="px-3 py-1.5 text-sm rounded font-medium bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40"
+                title="Save draft AND publish to wf_process_definition (syncs role config + button map)"
+              >
+                Publish
               </button>
               {saveState === 'error' && (
                 <span className="text-xs text-red-600 max-w-xs truncate" title={saveMsg}>{saveMsg}</span>
