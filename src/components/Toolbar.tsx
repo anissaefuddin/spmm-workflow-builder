@@ -18,7 +18,7 @@ interface ToolbarProps {
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
 export function Toolbar({ onOpenSettings, activeTab, onOpenVarFlow }: ToolbarProps) {
-  const { dsl, loadDSL, resetDSL, addStep, draftId, setDraftId, undo, redo, canUndo, canRedo } = useWorkflowStore()
+  const { dsl, loadDSL, resetDSL, addStep, draftId, setDraftId, setActiveDefinitionId, undo, redo, canUndo, canRedo } = useWorkflowStore()
   const fetchAll = useWorkflowListStore((s) => s.fetchAll)
   const backendUrl = useSettingsStore((s) => s.backendUrl)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -100,8 +100,15 @@ export function Toolbar({ onOpenSettings, activeTab, onOpenVarFlow }: ToolbarPro
       const newId = res.data.draftId
       setDraftId(newId)
 
-      // Sync role config + button map on publish
+      // CRITICAL: persist publishedDefinitionId to store after publish
+      // This ensures subsequent saves/publishes UPDATE the existing definition
+      // instead of creating a duplicate.
       const defId = res.data.publishedDefinitionId
+      if (defId) {
+        setActiveDefinitionId(defId)
+      }
+
+      // Sync role config + button map on publish
       if (publish && defId) {
         if (dsl.process.roleConfig?.length)  void saveRoleConfig(defId, dsl.process.roleConfig)
         if (dsl.process.buttonMap?.length)   void saveButtonMap(defId, dsl.process.buttonMap)

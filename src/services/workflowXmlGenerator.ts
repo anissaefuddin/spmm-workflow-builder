@@ -207,6 +207,18 @@ function serializeStep(step: WorkflowStep, xml: XmlBuilder) {
  *   console.error(result.error)
  * }
  */
+/**
+ * Minifies XML by removing indentation, blank lines, and inter-tag whitespace.
+ * Preserves text content inside elements and attribute values.
+ */
+export function minifyXml(xml: string): string {
+  return xml
+    .replace(/>\s+</g, '><')     // collapse whitespace between tags
+    .replace(/^\s+/gm, '')       // remove leading whitespace per line
+    .replace(/\n+/g, '')         // remove newlines
+    .trim()
+}
+
 export function generateXmlFromJson(dsl: WorkflowDSL, options: GenerateOptions = {}): GenerateResult {
   const errs = validateDSL(dsl)
   if (errs.length) return { ok: false, error: errs.join('; ') }

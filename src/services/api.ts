@@ -15,6 +15,14 @@ export type { ApiResult }
 
 // ── Builder endpoints ──────────────────────────────────────
 
+/** POST /validate-xml — validates XML without saving */
+export async function validateXml(xml: string, definitionId?: string): Promise<ApiResult<{
+  valid: boolean; errors: string[]; warnings: string[]
+  stepCount?: number; variableCount?: number
+}>> {
+  return apiPost('/validate-xml', { xml, definitionId })
+}
+
 /** POST /parse-xml — XML string → JSON DSL */
 export async function parseXml(
   xml: string,

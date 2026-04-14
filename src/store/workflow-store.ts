@@ -36,6 +36,7 @@ interface WorkflowState {
   ) => void
   resetDSL: () => void
   setDraftId: (id: string | null) => void
+  setActiveDefinitionId: (id: string | null) => void
   selectStep: (id: string | null) => void
 
   // History
@@ -145,6 +146,8 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
   }),
 
   setDraftId: (id) => set({ draftId: id }),
+
+  setActiveDefinitionId: (id) => set({ activeDefinitionId: id }),
 
   selectStep: (id) => set({ selectedStepId: id }),
 

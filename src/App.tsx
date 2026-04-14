@@ -7,9 +7,10 @@ import { MonitoringPage } from './pages/MonitoringPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { VariableFlowPanel } from './components/panels/VariableFlowPanel'
+import { XmlEditorPanel } from './components/panels/XmlEditorPanel'
 import { useWorkflowStore } from './store/workflow-store'
 
-type LeftTab = 'dashboard' | 'canvas' | 'variables' | 'monitor'
+type LeftTab = 'dashboard' | 'canvas' | 'variables' | 'monitor' | 'xml'
 
 const MIN_SIDEBAR = 280
 const MAX_SIDEBAR = 600
@@ -75,6 +76,7 @@ export default function App() {
     ...(dsl ? [
       { id: 'canvas'    as LeftTab, label: 'Canvas' },
       { id: 'variables' as LeftTab, label: 'Variables' },
+      { id: 'xml'       as LeftTab, label: 'XML' },
     ] : []),
     { id: 'monitor', label: 'Monitor', dot: 'text-green-500' },
   ]
@@ -112,6 +114,7 @@ export default function App() {
           {leftTab === 'dashboard' && <DashboardPage onNavigate={(tab) => setLeftTab(tab as LeftTab)} />}
           {leftTab === 'canvas'    && <WorkflowCanvas monitorHighlightStep={monitorHighlight} />}
           {leftTab === 'variables' && dsl && <FormBuilder />}
+          {leftTab === 'xml'       && dsl && <XmlEditorPanel onClose={() => setLeftTab('canvas')} />}
           {leftTab === 'monitor'   && (
             <MonitoringPage
               filterDefinitionId={activeDefinitionId ?? undefined}
