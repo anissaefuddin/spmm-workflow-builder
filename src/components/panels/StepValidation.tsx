@@ -21,8 +21,13 @@ function computeWarnings(step: WorkflowStep, allSteps: WorkflowStep[]): Warning[
 
   const checkTransition = (key: 'true' | 'false' | 'rollback', label: string) => {
     const t = step.transitions[key]
-    if (t !== undefined && !stepNums.has(t))
-      w.push({ key: `trans-${key}-missing`, text: `${label} → Step ${t} does not exist`, severity: 'warn' })
+    if (t === undefined) return
+    // Multi-target (parallel branches)
+    const targets = Array.isArray(t) ? t : [t]
+    for (const target of targets) {
+      if (!stepNums.has(target))
+        w.push({ key: `trans-${key}-${target}-missing`, text: `${label} → Step ${target} does not exist`, severity: 'warn' })
+    }
   }
 
   switch (step.type) {

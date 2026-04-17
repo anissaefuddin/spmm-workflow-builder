@@ -90,11 +90,20 @@ export function Toolbar({ onOpenSettings, activeTab, onOpenVarFlow }: ToolbarPro
     if (!dsl || !backendUrl) return
     setSaveState('saving')
     setSaveMsg('')
+    // Pre-generate XML on the frontend so the backend stores our correct output
+    // verbatim (preserves <required> positioning, raw form_data JSON, etc.)
+    const genRes = generateXmlFromJson(dsl)
+    if (!genRes.ok) {
+      setSaveState('error')
+      setSaveMsg(`XML generation failed: ${genRes.error}`)
+      return
+    }
     const res = await saveDraft({
       draftId: draftId ?? undefined,
       name:    dsl.process.name,
       dsl,
       publish,
+      xmlDefinition: genRes.xml,
     })
     if (res.ok) {
       const newId = res.data.draftId

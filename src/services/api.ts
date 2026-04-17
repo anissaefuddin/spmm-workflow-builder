@@ -45,13 +45,16 @@ export async function saveDraft(params: {
   dsl: WorkflowDSL
   publish?: boolean
   createdBy?: string
+  /** Optional pre-generated XML (frontend output). Backend stores it verbatim. */
+  xmlDefinition?: string
 }): Promise<ApiResult<{ draftId: string; status: string; publishedDefinitionId?: string }>> {
   return apiPost('/save', {
-    draftId:   params.draftId,
-    name:      params.name,
-    jsonDsl:   JSON.stringify(params.dsl),
-    publish:   params.publish ?? false,
-    createdBy: params.createdBy ?? '',
+    draftId:       params.draftId,
+    name:          params.name,
+    jsonDsl:       JSON.stringify(params.dsl),
+    xmlDefinition: params.xmlDefinition,
+    publish:       params.publish ?? false,
+    createdBy:     params.createdBy ?? '',
   })
 }
 

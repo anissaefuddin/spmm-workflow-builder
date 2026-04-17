@@ -53,11 +53,16 @@ function detectMainPath(steps: WorkflowStep[]): Set<number> {
     main.add(cur)
     const step = byNum.get(cur)
     if (!step) break
-    // Prefer true branch; fall back to the only transition available
-    if (step.transitions.true !== undefined) {
-      cur = step.transitions.true
-    } else if (step.transitions.false !== undefined) {
-      cur = step.transitions.false
+    // Prefer true branch; fall back to the only transition available.
+    // For parallel branches (array), follow the first target for main-path tracing.
+    const pickFirst = (t: number | number[] | undefined): number | undefined =>
+      t === undefined ? undefined : (Array.isArray(t) ? t[0] : t)
+    const nextTrue  = pickFirst(step.transitions.true)
+    const nextFalse = pickFirst(step.transitions.false)
+    if (nextTrue !== undefined) {
+      cur = nextTrue
+    } else if (nextFalse !== undefined) {
+      cur = nextFalse
     } else {
       break
     }
@@ -196,41 +201,44 @@ export function dslToReactFlow(
   // ── Edges ──────────────────────────────────────────────────
   const edges: Edge[] = []
 
+  // Normalize a transition target into an array (supports parallel branches)
+  const toTargets = (t: number | number[] | undefined): number[] =>
+    t === undefined ? [] : Array.isArray(t) ? t : [t]
+
   for (const step of steps) {
     const srcId  = `step-${step.number}`
 
-    if (step.transitions.true !== undefined) {
-      const tgtNum = step.transitions.true
+    for (const tgtNum of toTargets(step.transitions.true)) {
       const tgtId  = `step-${tgtNum}`
       const main   = isMainEdge(step.number, 'true', mainPathSteps, tgtNum)
+      const isParallel = Array.isArray(step.transitions.true) && (step.transitions.true as number[]).length > 1
       edges.push({
         id:           `e-${step.number}-true-${tgtNum}`,
         source:       srcId,
         sourceHandle: (step.type === 'decision_user' || step.type === 'decision_sistem') ? 'true' : undefined,
         target:       tgtId,
-        label:        step.type === 'form' ? '' : 'Approve',
+        label:        isParallel ? '∥ Parallel' : (step.type === 'form' ? '' : 'Approve'),
         type:         'smoothstep',
         style: {
-          stroke:      main ? '#15803d' : '#22c55e',
+          stroke:      main ? '#15803d' : (isParallel ? '#0ea5e9' : '#22c55e'),
           strokeWidth: main ? 3 : 1.5,
         },
         labelStyle: {
-          fill:       '#15803d',
+          fill:       isParallel ? '#0369a1' : '#15803d',
           fontSize:   11,
           fontWeight: main ? 700 : 400,
         },
         labelBgStyle: main ? { fill: '#f0fdf4', fillOpacity: 0.9 } : undefined,
-        data: { edgeType: 'true', main },
+        data: { edgeType: 'true', main, parallel: isParallel },
         animated: main,
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: main ? '#15803d' : '#22c55e',
+          color: main ? '#15803d' : (isParallel ? '#0ea5e9' : '#22c55e'),
         },
       })
     }
 
-    if (step.transitions.false !== undefined) {
-      const tgtNum = step.transitions.false
+    for (const tgtNum of toTargets(step.transitions.false)) {
       const tgtId  = `step-${tgtNum}`
       edges.push({
         id:           `e-${step.number}-false-${tgtNum}`,
@@ -251,8 +259,7 @@ export function dslToReactFlow(
       })
     }
 
-    if (step.transitions.rollback !== undefined) {
-      const tgtNum = step.transitions.rollback
+    for (const tgtNum of toTargets(step.transitions.rollback)) {
       const tgtId  = `step-${tgtNum}`
       edges.push({
         id:           `e-${step.number}-rollback-${tgtNum}`,

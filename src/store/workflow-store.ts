@@ -257,7 +257,18 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
       ...dsl,
       process: {
         ...dsl.process,
-        steps: dsl.process.steps.map((step) => step.id === id ? ({ ...step, ...patch } as WorkflowStep) : step),
+        steps: dsl.process.steps.map((step) => {
+          if (step.id !== id) return step
+          // Invalidate cached raw JSON when its parsed counterpart is edited,
+          // otherwise the generator emits the stale import-time JSON and silently
+          // drops UI-added fields (e.g. a new variable added to form_data_input).
+          const next = { ...step, ...patch } as Record<string, unknown>
+          if ('formDataInput' in patch) next._rawFormDataInput = undefined
+          if ('formDataView'  in patch) next._rawFormDataView  = undefined
+          if ('formData'      in patch) next._rawFormData      = undefined
+          if ('decisionKey'   in patch) next._rawDecisionKey   = undefined
+          return next as unknown as WorkflowStep
+        }),
       },
     })),
 

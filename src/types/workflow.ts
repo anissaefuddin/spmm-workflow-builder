@@ -12,7 +12,7 @@ export type StepType =
   | 'end'
   | 'system_action' // generic system step (system_update_*, etc.)
 
-export type Operator = '>' | '<' | '>=' | '<=' | '==' | '!='
+export type Operator = '>' | '<' | '>=' | '<=' | '==' | '!=' | '='
 
 // ── Variable Types ───────────────────────────────────────────
 // Maps from: <vtype> element inside <variabel>
@@ -40,13 +40,25 @@ export interface WorkflowVariable {
   value1: string
   // Secondary value — maps to <value2>
   // For Option type: pipe-separated options string ("Ya|Tidak")
+  // Always emitted (empty string allowed) for engine compatibility.
   value2?: string
   // Variable type — maps to <vtype>
   vtype: VariableType
   // Required flag — maps to <required> ("true"/"false")
   required?: boolean
+  // Position of <required> in output XML (for round-trip fidelity):
+  //   'pre'  = before <value1>  (default for Date/String/Number/etc)
+  //   'mid'  = between <value1> and <value2>  (e.g. Assesor_1 Option type)
+  //   'post' = after <vtype>  (for file/custom types)
+  requiredPosition?: 'pre' | 'mid' | 'post'
   // Template file path — maps to <linkfile> (for file-type variables)
   linkfile?: string
+  // Label flag — maps to <label> ("true"/"false")
+  // For custom-formdata variables to indicate they are label/display fields
+  label?: boolean
+  // Read-only flag — maps to <readonly> ("true"/"false")
+  // For custom-formdata assessor variables that should not be edited downstream
+  readonly?: boolean
   // Legacy alias kept for backward compat with earlier DSL snapshots
   defaultValue?: string
 }
@@ -57,10 +69,16 @@ export interface WorkflowRole {
 }
 
 // ── Transitions ─────────────────────────────────────────────
+// Each transition may be:
+//   - undefined (no transition)
+//   - number (single target, e.g. 12)
+//   - number[] (parallel branches, e.g. [12, 13] → "12;13" in XML)
+// The engine treats semicolon-separated targets as parallel activation.
+export type TransitionTarget = number | number[]
 export interface StepTransitions {
-  true?: number
-  false?: number
-  rollback?: number
+  true?: TransitionTarget
+  false?: TransitionTarget
+  rollback?: TransitionTarget
 }
 
 // ── Form Fields ─────────────────────────────────────────────
@@ -93,14 +111,23 @@ interface BaseStep {
   role?: string
   transitions: StepTransitions
   // Common step metadata (from spme-mahadaly.xml)
-  title?: string         // <title>
+  title?: string         // <title> — undefined=absent, ''=present-but-empty
   grup?: string          // <grup>
   status?: string        // <status>
   statustiket?: string   // <statustiket>
+  viewer?: string        // <viewer> — comma-separated roles with view access
   logstart?: string      // <logstart>
   logtrue?: string       // <logtrue>  (not in all XML but present in full schema)
   logfalse?: string      // <logfalse>
   logsave?: string       // <logsave>
+  // Round-trip ordering hints (for faithful XML reproduction)
+  roleBeforeType?: boolean   // true → emit <role> before <type> (default: false = type first)
+  titleBeforeType?: boolean  // true → emit <title> before <type> (e.g. step 44 end step)
+  _roleAfterType?: boolean   // true → also emit a second <role> after <type> (quirk in some source XMLs)
+  // Original order of status/log fields from source XML.
+  // When present, generator emits these fields in this order.
+  // e.g. ['logtrue', 'statustiket'] when logtrue precedes statustiket.
+  _statusLogOrder?: string[]
 }
 
 // ── form step ────────────────────────────────────────────────
@@ -112,6 +139,14 @@ export interface FormStep extends BaseStep {
   formDataInput?: FormFieldMap  // <form_data_input> — writable fields
   formDataView?: FormFieldMap   // <form_data_view>  — read-only fields
   decisionKey?: DecisionKeyMap  // <decision_key> on form steps (button config)
+  // Raw JSON strings preserved from source XML for faithful round-trip output.
+  // When set, the generator uses these verbatim instead of re-serializing the parsed maps.
+  _rawFormData?: string
+  _rawFormDataInput?: string
+  _rawFormDataView?: string
+  _rawDecisionKey?: string
+  // When true, emit <form_data_input> before <form_data_view> (default: view first)
+  _formDataInputFirst?: boolean
 }
 
 // ── decision_user step ────────────────────────────────────────
@@ -120,6 +155,8 @@ export interface DecisionUserStep extends BaseStep {
   rule: string
   viewFields: string[]
   decisionKey: FormFieldMap
+  // Raw JSON string preserved for round-trip fidelity
+  _rawDecisionKey?: string
 }
 
 // ── decision_sistem step ──────────────────────────────────────

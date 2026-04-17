@@ -25,6 +25,11 @@ import { apiPost } from '../../services/apiClient'
 import { saveDraft } from '../../services/api'
 import { compareDSL } from '../../lib/dsl-diff'
 import type { DiffEntry } from '../../lib/dsl-diff'
+import { validateWorkflow } from '../../lib/workflow-validator'
+import type { ValidationReport } from '../../lib/workflow-validator'
+import { simulate, summarizeSimulation } from '../../lib/workflow-simulator'
+import type { SimulationResult } from '../../lib/workflow-simulator'
+import { autoFixWorkflow, summarizeAutofix } from '../../lib/workflow-autofix'
 
 interface Props {
   onClose?: () => void
@@ -52,6 +57,9 @@ export function XmlEditorPanel({ onClose }: Props) {
   const [xml, setXml] = useState('')
   const [validation, setValidation] = useState<ValidationResult | null>(null)
   const [validating, setValidating] = useState(false)
+  const [clientReport, setClientReport] = useState<ValidationReport | null>(null)
+  const [simResult, setSimResult] = useState<SimulationResult | null>(null)
+  const [autofixMsg, setAutofixMsg] = useState<string | null>(null)
   const [diff, setDiff] = useState<DiffEntry[] | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
@@ -65,9 +73,26 @@ export function XmlEditorPanel({ onClose }: Props) {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Validate XML ──
+  // Runs two checks:
+  //   1. Server XML validation (well-formed + active process count)
+  //   2. Client-side DSL validation (full checklist: roles, options, decisions, parallel, reachability)
   const handleValidate = useCallback(async () => {
     setValidating(true)
     setValidation(null)
+    setClientReport(null)
+
+    // Client-side: parse the XML to DSL, then run full validator
+    const parsed = parseXmlToJson(xml, { processName: dsl?.process.name ?? 'workflow' })
+    if (parsed.ok) {
+      setClientReport(validateWorkflow(parsed.data))
+    } else {
+      setClientReport({
+        valid: false, errors: 1, warnings: 0, infos: 0,
+        issues: [{ severity: 'error', category: 'xml', message: parsed.error }],
+      })
+    }
+
+    // Server-side XML well-formedness + active-process warning
     const res = await apiPost<ValidationResult>('/validate-xml', {
       xml,
       definitionId: activeDefinitionId ?? undefined,
@@ -78,7 +103,7 @@ export function XmlEditorPanel({ onClose }: Props) {
     } else {
       setValidation({ valid: false, errors: [res.error], warnings: [] })
     }
-  }, [xml, activeDefinitionId])
+  }, [xml, dsl, activeDefinitionId])
 
   // ── Preview Changes (diff) ──
   const handlePreviewDiff = useCallback(() => {
@@ -89,6 +114,41 @@ export function XmlEditorPanel({ onClose }: Props) {
       return
     }
     setDiff(compareDSL(dsl, parsed.data))
+  }, [xml, dsl])
+
+  // ── Simulate execution paths ──
+  const handleSimulate = useCallback(() => {
+    if (!dsl) return
+    const parsed = parseXmlToJson(xml, { processName: dsl.process.name })
+    const target = parsed.ok ? parsed.data : dsl
+    const result = simulate(target, { maxPaths: 200, maxDepth: 150 })
+    setSimResult(result)
+  }, [xml, dsl])
+
+  // ── Auto-Fix: parse current XML → DSL → run autofix → regenerate XML ──
+  const handleAutofix = useCallback(() => {
+    if (!dsl) return
+    const parsed = parseXmlToJson(xml, { processName: dsl.process.name })
+    if (!parsed.ok) {
+      setAutofixMsg(`Parse error: ${parsed.error}`)
+      setTimeout(() => setAutofixMsg(null), 3000)
+      return
+    }
+    const result = autoFixWorkflow(parsed.data)
+    if (result.fixedCount === 0 && result.flaggedCount === 0) {
+      setAutofixMsg('No issues to fix — workflow is clean')
+      setTimeout(() => setAutofixMsg(null), 3000)
+      return
+    }
+    // Regenerate XML from the fixed DSL
+    const regen = generateXmlFromJson(result.dsl)
+    if (regen.ok) {
+      setXml(regen.xml)
+      // Refresh the client report so the user sees the improvements
+      setClientReport(validateWorkflow(result.dsl))
+    }
+    setAutofixMsg(`✓ ${summarizeAutofix(result)}`)
+    setTimeout(() => setAutofixMsg(null), 5000)
   }, [xml, dsl])
 
   // ── Save Draft (no publish) ──
@@ -111,11 +171,14 @@ export function XmlEditorPanel({ onClose }: Props) {
 
     setSaving(true)
     setSaveMsg(null)
+    // Send the edited XML verbatim — the user's hand-edited XML is the source
+    // of truth here, not the parsed/regenerated version.
     const res = await saveDraft({
       draftId: draftId ?? undefined,
       name: parsed.data.process.name,
       dsl: parsed.data,
       publish,
+      xmlDefinition: xml,
     })
     setSaving(false)
 
@@ -189,6 +252,26 @@ export function XmlEditorPanel({ onClose }: Props) {
           >
             Preview Changes
           </button>
+          <button
+            onClick={handleSimulate}
+            className="px-3 py-1 text-xs border border-indigo-300 text-indigo-700 rounded hover:bg-indigo-50"
+            title="Run workflow simulation to detect deadlocks, loops, and premature ends"
+          >
+            ⚡ Simulate
+          </button>
+          <button
+            onClick={handleAutofix}
+            disabled={mode !== 'edit'}
+            className="px-3 py-1 text-xs border border-emerald-300 text-emerald-700 rounded hover:bg-emerald-50 disabled:opacity-40"
+            title="Apply safe auto-fixes: role format, Option value2, duplicate vars, transition normalization"
+          >
+            🔧 Auto-Fix
+          </button>
+          {autofixMsg && (
+            <span className={`text-xs ${autofixMsg.startsWith('✓') ? 'text-green-600' : 'text-amber-600'}`}>
+              {autofixMsg}
+            </span>
+          )}
           <div className="flex-1" />
           <button
             onClick={() => handleSaveDraft(false)}
@@ -221,7 +304,7 @@ export function XmlEditorPanel({ onClose }: Props) {
             ${validation.valid ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
             <div className="flex items-center gap-2">
               <span className={`font-bold ${validation.valid ? 'text-green-700' : 'text-red-700'}`}>
-                {validation.valid ? '✓ Valid' : '✕ Invalid'}
+                {validation.valid ? '✓ XML Valid' : '✕ XML Invalid'}
               </span>
               {validation.stepCount !== undefined && (
                 <span className="text-gray-500">{validation.stepCount} steps · {validation.variableCount} variables</span>
@@ -234,6 +317,109 @@ export function XmlEditorPanel({ onClose }: Props) {
             {validation.warnings.map((w, i) => (
               <p key={i} className="text-amber-600">Warning: {w}</p>
             ))}
+          </div>
+        )}
+
+        {/* Client-side DSL validation report */}
+        {clientReport && (
+          <div className={`px-5 py-2 border-b text-xs space-y-0.5 max-h-48 overflow-y-auto
+            ${clientReport.valid ? 'bg-green-50/50 border-green-200' : 'bg-red-50/50 border-red-200'}`}>
+            <div className="flex items-center gap-2 mb-1">
+              <span className={`font-bold ${clientReport.valid ? 'text-green-700' : 'text-red-700'}`}>
+                {clientReport.valid ? '✓ DSL Valid' : '✕ DSL Invalid'}
+              </span>
+              <span className="text-gray-500">
+                {clientReport.errors} errors · {clientReport.warnings} warnings · {clientReport.infos} info
+              </span>
+              <button onClick={() => setClientReport(null)} className="ml-auto text-gray-400 hover:text-gray-600">dismiss</button>
+            </div>
+            {clientReport.issues.map((issue, i) => {
+              const isLogic = issue.category.startsWith('logic:')
+              const displayCategory = isLogic ? issue.category.slice(6) : issue.category
+              const color =
+                issue.severity === 'error' ? 'text-red-600' :
+                issue.severity === 'warning' ? 'text-amber-600' : 'text-blue-500'
+              const icon =
+                issue.severity === 'error' ? '✕' :
+                issue.severity === 'warning' ? '⚠' : 'ℹ'
+              // Logic issues get a distinctive purple/violet tag so users see runtime-semantic
+              // problems separately from structural ones.
+              const tagCls = isLogic
+                ? 'bg-purple-100 text-purple-700 font-semibold'
+                : 'bg-gray-100 text-gray-500'
+              return (
+                <p key={i} className={`${color} flex gap-1.5 items-start`}>
+                  <span className="shrink-0">{icon}</span>
+                  <span className={`text-[10px] px-1 rounded shrink-0 ${tagCls}`}>
+                    {isLogic && '⚡ '}{displayCategory}
+                  </span>
+                  <span>{issue.message}</span>
+                </p>
+              )
+            })}
+          </div>
+        )}
+
+        {/* Simulation result */}
+        {simResult && (
+          <div className="px-5 py-2 border-b border-indigo-200 bg-indigo-50/50 max-h-48 overflow-y-auto">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs font-bold text-indigo-700">⚡ Execution Simulation</span>
+              <span className="text-[10px] text-gray-500">{summarizeSimulation(simResult)}</span>
+              <button onClick={() => setSimResult(null)} className="ml-auto text-[10px] text-gray-400 hover:text-gray-600">dismiss</button>
+            </div>
+            <div className="grid grid-cols-4 gap-2 text-[10px] mb-1.5">
+              <div className="bg-white rounded border border-gray-200 px-2 py-1">
+                <div className="text-gray-400 uppercase">Paths</div>
+                <div className="font-mono font-bold text-gray-800">{simResult.paths.length}</div>
+              </div>
+              <div className={`rounded border px-2 py-1 ${simResult.deadlocks.length > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
+                <div className="text-gray-400 uppercase">Deadlocks</div>
+                <div className={`font-mono font-bold ${simResult.deadlocks.length > 0 ? 'text-red-700' : 'text-gray-800'}`}>
+                  {simResult.deadlocks.length}
+                </div>
+              </div>
+              <div className={`rounded border px-2 py-1 ${simResult.infiniteLoops.length > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
+                <div className="text-gray-400 uppercase">Loops</div>
+                <div className={`font-mono font-bold ${simResult.infiniteLoops.length > 0 ? 'text-amber-700' : 'text-gray-800'}`}>
+                  {simResult.infiniteLoops.length}
+                </div>
+              </div>
+              <div className={`rounded border px-2 py-1 ${simResult.prematureEnds.length > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
+                <div className="text-gray-400 uppercase">Premature</div>
+                <div className={`font-mono font-bold ${simResult.prematureEnds.length > 0 ? 'text-red-700' : 'text-gray-800'}`}>
+                  {simResult.prematureEnds.length}
+                </div>
+              </div>
+            </div>
+
+            {simResult.deadlocks.length > 0 && (
+              <p className="text-[10px] text-red-600">Deadlock at step{simResult.deadlocks.length !== 1 ? 's' : ''}: {simResult.deadlocks.join(', ')}</p>
+            )}
+            {simResult.infiniteLoops.length > 0 && (
+              <p className="text-[10px] text-amber-600">Loop detected involving step{simResult.infiniteLoops.length !== 1 ? 's' : ''}: {simResult.infiniteLoops.join(', ')}</p>
+            )}
+            {simResult.prematureEnds.length > 0 && (
+              <p className="text-[10px] text-red-600">Premature end at step{simResult.prematureEnds.length !== 1 ? 's' : ''}: {simResult.prematureEnds.join(', ')}</p>
+            )}
+
+            {/* Path outcome breakdown */}
+            <div className="mt-2 flex flex-wrap gap-1">
+              {Object.entries(
+                simResult.paths.reduce<Record<string, number>>((acc, p) => {
+                  acc[p.outcome] = (acc[p.outcome] ?? 0) + 1
+                  return acc
+                }, {}),
+              ).map(([outcome, count]) => (
+                <span key={outcome} className="text-[9px] bg-white border border-gray-200 rounded px-1.5 py-0.5 font-mono">
+                  {outcome}: {count}
+                </span>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">
+              Max concurrency: {simResult.maxConcurrency} · Explored {simResult.totalStatesExplored} states
+              {simResult.truncated && ' (truncated)'}
+            </p>
           </div>
         )}
 
