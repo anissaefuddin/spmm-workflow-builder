@@ -16,6 +16,7 @@ import DecisionUserNode from './nodes/DecisionUserNode'
 import DecisionSistemNode from './nodes/DecisionSistemNode'
 import SystemActionNode from './nodes/SystemActionNode'
 import EndNode from './nodes/EndNode'
+import ParallelSwimlaneNode from './nodes/ParallelSwimlaneNode'
 
 // nodeTypes MUST be defined outside the component — a stable reference is required.
 // Defining it inside triggers React Flow to remount every node on each render.
@@ -25,6 +26,7 @@ const nodeTypes: NodeTypes = {
   decisionSistemNode: DecisionSistemNode,
   systemActionNode: SystemActionNode,
   endNode: EndNode,
+  parallelSwimlane: ParallelSwimlaneNode,
 }
 
 export function WorkflowCanvas({ monitorHighlightStep }: { monitorHighlightStep?: number | null }) {
@@ -33,7 +35,7 @@ export function WorkflowCanvas({ monitorHighlightStep }: { monitorHighlightStep?
 
   // ── Graph state ──────────────────────────────────────────────
   // Pre-compute from the DSL already in store at mount so fitView fires on real nodes.
-  const initGraph = useRef(dsl ? dslToReactFlow(dsl) : { nodes: [], edges: [], meta: { mainPathSteps: new Set<number>(), isComplex: false } })
+  const initGraph = useRef(dsl ? dslToReactFlow(dsl) : { nodes: [], edges: [], meta: { mainPathSteps: new Set<number>(), isComplex: false, parallelBlocks: [] } })
   const [nodes, setNodes, onNodesChange] = useNodesState(initGraph.current.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initGraph.current.edges)
   const [graphMeta, setGraphMeta] = useState(initGraph.current.meta)
@@ -49,7 +51,7 @@ export function WorkflowCanvas({ monitorHighlightStep }: { monitorHighlightStep?
     if (!dsl) {
       setNodes([])
       setEdges([])
-      setGraphMeta({ mainPathSteps: new Set(), isComplex: false })
+      setGraphMeta({ mainPathSteps: new Set(), isComplex: false, parallelBlocks: [] })
       return
     }
     const result = dslToReactFlow(dsl)
@@ -83,11 +85,14 @@ export function WorkflowCanvas({ monitorHighlightStep }: { monitorHighlightStep?
   const visibleNodes = useMemo(() => {
     return nodes
       .filter((n) => {
+        // Swimlane backdrop nodes follow the step-filter: hidden in main-only mode.
+        if (n.type === 'parallelSwimlane') return !showOnlyMain
         if (!showOnlyMain) return true
         const num = parseInt(n.id.replace('step-', ''), 10)
         return graphMeta.mainPathSteps.has(num)
       })
       .map((n) => {
+        if (n.type === 'parallelSwimlane') return n
         const stepNum = parseInt(n.id.replace('step-', ''), 10)
         const isSelected = (() => {
           if (!selectedStepId || !dsl) return false
@@ -180,6 +185,24 @@ export function WorkflowCanvas({ monitorHighlightStep }: { monitorHighlightStep?
             <span className="font-bold text-gray-800">{dsl.process.roles.length}</span> roles
           </span>
         </div>
+
+        {/* Parallel-block indicator — shown only when detector found any */}
+        {graphMeta.parallelBlocks.length > 0 && (
+          <div className="bg-sky-50/95 backdrop-blur-sm border border-sky-200 rounded-lg px-3 py-1.5 shadow-sm pointer-events-none">
+            <span className="text-xs text-sky-700">
+              <span className="font-bold">∥ {graphMeta.parallelBlocks.length}</span>{' '}
+              paralel block terdeteksi
+              {' · '}
+              <span className="font-bold">
+                {graphMeta.parallelBlocks.reduce(
+                  (sum, b) => sum + b.branches.reduce((s, br) => s + br.length, 0),
+                  0,
+                )}
+              </span>{' '}
+              step ter-group
+            </span>
+          </div>
+        )}
 
         {/* Collapse toggle — only shown for complex workflows */}
         {graphMeta.isComplex && (

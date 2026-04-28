@@ -6,6 +6,7 @@ import dagre from 'dagre'
 import type { Node, Edge } from 'reactflow'
 import { MarkerType } from 'reactflow'
 import type { WorkflowDSL, WorkflowStep } from '../types/workflow'
+import { detectParallelBlocks, type DetectedParallelBlock } from './parallel-block-detector'
 
 // ── Node dimensions (must match rendered size) ───────────────
 const NODE_W = 220
@@ -156,6 +157,59 @@ function nodeReactFlowType(step: WorkflowStep): string {
 export interface GraphMeta {
   mainPathSteps: Set<number>
   isComplex: boolean
+  parallelBlocks: DetectedParallelBlock[]
+}
+
+// ── Swimlane layout ──────────────────────────────────────────
+// For each detected parallel block, compute a bounding rect that
+// covers all step nodes in a single branch. Rendered as a custom
+// React Flow node with zIndex below the step nodes so it appears
+// as a colored backdrop — purely visual, no interaction.
+
+const SWIMLANE_PAD_X = 24
+const SWIMLANE_PAD_Y = 32  // extra room for the header label
+
+interface SwimlaneRect {
+  blockId: string
+  branchIndex: number
+  actorLabel: string
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+function computeSwimlaneRects(
+  blocks: DetectedParallelBlock[],
+  positions: Map<number, { x: number; y: number }>,
+  stepWidthOf: (num: number) => number,
+): SwimlaneRect[] {
+  const rects: SwimlaneRect[] = []
+  for (const block of blocks) {
+    block.branches.forEach((branchSteps, branchIndex) => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const stepNum of branchSteps) {
+        const p = positions.get(stepNum)
+        if (!p) continue
+        const w = stepWidthOf(stepNum)
+        if (p.x < minX) minX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.x + w > maxX) maxX = p.x + w
+        if (p.y + NODE_H > maxY) maxY = p.y + NODE_H
+      }
+      if (!isFinite(minX)) return
+      rects.push({
+        blockId: block.id,
+        branchIndex,
+        actorLabel: block.actors[branchIndex] ?? `Aktor ${branchIndex + 1}`,
+        x: minX - SWIMLANE_PAD_X,
+        y: minY - SWIMLANE_PAD_Y,
+        w: maxX - minX + SWIMLANE_PAD_X * 2,
+        h: maxY - minY + SWIMLANE_PAD_Y + SWIMLANE_PAD_X,
+      })
+    })
+  }
+  return rects
 }
 
 export function dslToReactFlow(
@@ -165,15 +219,45 @@ export function dslToReactFlow(
 
   if (steps.length === 0) {
     console.warn('[graph-adapter] No steps in DSL')
-    return { nodes: [], edges: [], meta: { mainPathSteps: new Set(), isComplex: false } }
+    return {
+      nodes: [],
+      edges: [],
+      meta: { mainPathSteps: new Set(), isComplex: false, parallelBlocks: [] },
+    }
   }
 
   const mainPathSteps = detectMainPath(steps)
   const isComplex     = steps.length >= 6
   const positions     = dagreLayout(steps)
+  const parallelBlocks = detectParallelBlocks(dsl)
 
   console.log('[graph-adapter] mainPath:', [...mainPathSteps])
   console.log('[graph-adapter] positions:', Object.fromEntries(positions))
+  console.log('[graph-adapter] parallelBlocks:', parallelBlocks.length, parallelBlocks)
+
+  // ── Swimlane background nodes (one per branch, rendered underneath) ──
+  const stepWidthOf = (num: number) => {
+    const s = steps.find((x) => x.number === num)
+    return s?.type === 'end' ? END_W : NODE_W
+  }
+  const swimlanes = computeSwimlaneRects(parallelBlocks, positions, stepWidthOf)
+  const swimlaneNodes: Node[] = swimlanes.map((rect) => ({
+    id: `swimlane-${rect.blockId}-${rect.branchIndex}`,
+    type: 'parallelSwimlane',
+    position: { x: rect.x, y: rect.y },
+    // Width/height must be on the node itself so React Flow reserves space.
+    style: { width: rect.w, height: rect.h, zIndex: -1 },
+    data: {
+      actorLabel: rect.actorLabel,
+      branchIndex: rect.branchIndex,
+      width: rect.w,
+      height: rect.h,
+    },
+    draggable: false,
+    selectable: false,
+    focusable: false,
+    zIndex: -1,
+  }))
 
   // ── Nodes ──────────────────────────────────────────────────
   const nodes: Node[] = steps.map((step, index) => {
@@ -280,8 +364,16 @@ export function dslToReactFlow(
     }
   }
 
-  console.log('[WorkflowCanvas] NODES:', nodes)
-  console.log('[WorkflowCanvas] EDGES:', edges)
+  // Swimlane nodes are prepended so they sit first in the array, which in
+  // React Flow combined with zIndex:-1 reliably renders them behind step nodes.
+  const allNodes = [...swimlaneNodes, ...nodes]
 
-  return { nodes, edges, meta: { mainPathSteps, isComplex } }
+  console.log('[WorkflowCanvas] NODES:', allNodes.length, '(swimlanes:', swimlaneNodes.length, ')')
+  console.log('[WorkflowCanvas] EDGES:', edges.length)
+
+  return {
+    nodes: allNodes,
+    edges,
+    meta: { mainPathSteps, isComplex, parallelBlocks },
+  }
 }

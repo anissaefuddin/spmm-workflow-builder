@@ -85,6 +85,13 @@ class XmlBuilder {
   close(name: string, depth: number) { this.lines.push(`${this.i.repeat(depth)}</${name}>`) }
   blank() { this.lines.push('') }
 
+  /** XML comment — used for builder-only annotations that the engine ignores. */
+  comment(text: string, depth: number) {
+    // Comments cannot contain "--" per the XML spec; escape defensively.
+    const safe = text.replace(/--/g, '- -')
+    this.lines.push(`${this.i.repeat(depth)}<!-- ${safe} -->`)
+  }
+
   toString() { return this.lines.join('\n') }
 }
 
@@ -316,12 +323,27 @@ export function minifyXml(xml: string): string {
     .trim()
 }
 
+// Marker used by the parallel-block annotation round-trip.
+// The spmm-be XML parser ignores XML comments, so this is invisible to runtime.
+const PARALLEL_BLOCKS_MARKER = '@@parallelBlocks:'
+
 export function generateXmlFromJson(dsl: WorkflowDSL, options: GenerateOptions = {}): GenerateResult {
   const errs = validateDSL(dsl)
   if (errs.length) return { ok: false, error: errs.join('; ') }
 
   const xml = new XmlBuilder(options.indent ?? '\t')
   xml.open('Process_Definition', 0)
+
+  // Builder-only annotation — parallel block grouping hints.
+  // Emitted as an XML comment at the top so it's easy to spot but doesn't
+  // interfere with engine parsing. Only emitted when present in the DSL.
+  if (dsl.process.parallelBlocks && dsl.process.parallelBlocks.length > 0) {
+    xml.comment(
+      `${PARALLEL_BLOCKS_MARKER} ${JSON.stringify(dsl.process.parallelBlocks)}`,
+      1,
+    )
+  }
+
   xml.blank()
   serializeRoles(dsl, xml)
   xml.blank()

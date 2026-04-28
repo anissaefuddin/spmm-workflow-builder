@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useWorkflowStore } from '../../store/workflow-store'
 import { RoleConfigPanel } from './RoleConfigPanel'
+import { ParallelBlocksPanel } from './ParallelBlocksPanel'
 
 export function ProcessPanel() {
   const { dsl, setProcessName, setRoleStart, addRole, removeRole, addVariable, removeVariable, updateVariable } =
@@ -141,6 +142,14 @@ export function ProcessPanel() {
             Add
           </button>
         </div>
+      </div>
+
+      {/* Parallel Blocks — auto-detected fork-join groups */}
+      <div>
+        <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">
+          Parallel Blocks
+        </label>
+        <ParallelBlocksPanel />
       </div>
     </div>
   )

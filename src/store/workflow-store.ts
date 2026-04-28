@@ -10,6 +10,7 @@ import type {
   SystemActionStep,
   EndStep,
 } from '../types/workflow'
+import { detectParallelBlocks } from '../lib/parallel-block-detector'
 
 const MAX_HISTORY = 50
 
@@ -60,6 +61,33 @@ interface WorkflowState {
   addStep: (type: WorkflowStep['type']) => void
   updateStep: (id: string, patch: Partial<WorkflowStep>) => void
   removeStep: (id: string) => void
+
+  // Parallel-block actions
+  /**
+   * Copy authoring content (title, form_data, meta) from one branch of a
+   * detected parallel block to the other, with actor-index substitution
+   * (Asesor 1 ↔ Asesor 2, _asesor1 ↔ _asesor2, spelling-tolerant).
+   * Transitions, step numbers, and ids are left untouched — only content
+   * that is expected to mirror is copied.
+   */
+  syncParallelBranch: (
+    blockId: string,
+    fromBranchIndex: number,
+    toBranchIndex: number,
+  ) => { copiedSteps: number } | null
+
+  /**
+   * Persist the currently detected parallel blocks into the DSL as an
+   * annotation — emitted to XML as a comment on save, so next-session
+   * opens the file with the same groupings pre-confirmed.
+   */
+  commitParallelBlockAnnotations: () => { count: number }
+
+  /**
+   * Clear any persisted parallel-block annotations from the DSL.
+   * Detector will still auto-detect on next load.
+   */
+  clearParallelBlockAnnotations: () => void
 }
 
 function makeEmptyDSL(): WorkflowDSL {
@@ -93,6 +121,44 @@ function makeEmptyDSL(): WorkflowDSL {
 function nextStepNumber(dsl: WorkflowDSL): number {
   if (dsl.process.steps.length === 0) return 0
   return Math.max(...dsl.process.steps.map((s) => s.number)) + 1
+}
+
+// ── Actor substitution ────────────────────────────────────────
+// Replace "Asesor <fromIdx+1>" with "Asesor <toIdx+1>" in both free-text
+// (titles) and identifier tokens (field names, form_data keys/values).
+// Tolerant to Indonesian spelling variants used inconsistently across
+// this codebase: asesor, asessor, assessor (case-insensitive).
+
+function substituteActor(text: string, fromIdx: number, toIdx: number): string {
+  if (!text) return text
+  const fromN = String(fromIdx + 1)
+  const toN = String(toIdx + 1)
+  // Matches: "asesor 1", "Asessor_1", "praasesor1" — any spelling, any separator.
+  // Preserves the prefix/separator so casing and underscores stay intact.
+  const pattern = /(ass?ess?or[\s_]*)([12])/gi
+  return text.replace(pattern, (match, prefix: string, num: string) => {
+    if (num === fromN) return `${prefix}${toN}`
+    if (num === toN) return match       // don't touch the target's own refs
+    return match
+  })
+}
+
+function substituteRecord(
+  obj: Record<string, string> | undefined,
+  fromIdx: number,
+  toIdx: number,
+): Record<string, string> | undefined {
+  if (!obj) return obj
+  const next: Record<string, string> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    next[substituteActor(k, fromIdx, toIdx)] = substituteActor(v, fromIdx, toIdx)
+  }
+  return next
+}
+
+function substituteFields(fields: string[] | undefined, fromIdx: number, toIdx: number) {
+  if (!fields) return fields
+  return fields.map((f) => substituteActor(f, fromIdx, toIdx))
 }
 
 // ── History helper ────────────────────────────────────────────
@@ -277,4 +343,144 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
       ...dsl,
       process: { ...dsl.process, steps: dsl.process.steps.filter((step) => step.id !== id) },
     })),
+
+  // ── Parallel-block: sync source → target branch ─────────────
+  // Runs the detector to locate the block, pairs up steps by index,
+  // copies authoring content with actor-index substitution.
+
+  syncParallelBranch: (blockId, fromBranchIndex, toBranchIndex) => {
+    let report: { copiedSteps: number } | null = null
+    set((s) => {
+      if (!s.dsl) return s
+      const blocks = detectParallelBlocks(s.dsl)
+      const block = blocks.find((b) => b.id === blockId)
+      if (!block) return s
+      const fromBranch = block.branches[fromBranchIndex]
+      const toBranch = block.branches[toBranchIndex]
+      if (!fromBranch || !toBranch) return s
+
+      const pairCount = Math.min(fromBranch.length, toBranch.length)
+      const byNum = new Map(s.dsl.process.steps.map((st) => [st.number, st]))
+
+      // Build a map from targetStepId → patched step
+      const patched = new Map<string, WorkflowStep>()
+
+      for (let i = 0; i < pairCount; i++) {
+        const src = byNum.get(fromBranch[i])
+        const tgt = byNum.get(toBranch[i])
+        if (!src || !tgt || src.type !== tgt.type) continue
+
+        // Start with the target so we preserve id/number/transitions.
+        // Double-cast through unknown is required because WorkflowStep is a
+        // discriminated union and lacks an index signature.
+        const next = { ...tgt } as unknown as Record<string, unknown> & WorkflowStep
+
+        // Copy shared meta with substitution
+        const srcAny = src as unknown as Record<string, unknown>
+        const copyField = <T>(key: string, transform?: (v: T) => T) => {
+          if (!(key in srcAny) || srcAny[key] === undefined) return
+          const v = srcAny[key] as T
+          next[key] = transform ? transform(v) : v
+        }
+
+        copyField<string>('title',       (v) => substituteActor(v, fromBranchIndex, toBranchIndex))
+        copyField<string>('grup')
+        copyField<string>('status')
+        copyField<string>('statustiket')
+        copyField<string>('viewer')
+        copyField<string>('logstart',    (v) => substituteActor(v, fromBranchIndex, toBranchIndex))
+        copyField<string>('logtrue',     (v) => substituteActor(v, fromBranchIndex, toBranchIndex))
+        copyField<string>('logfalse',    (v) => substituteActor(v, fromBranchIndex, toBranchIndex))
+        copyField<string>('logsave',     (v) => substituteActor(v, fromBranchIndex, toBranchIndex))
+
+        if (src.type === 'form' && next.type === 'form') {
+          const srcForm = src as FormStep
+          const nextForm = next as FormStep
+          nextForm.formFields = substituteFields(srcForm.formFields, fromBranchIndex, toBranchIndex) ?? []
+          nextForm.formData = substituteRecord(srcForm.formData, fromBranchIndex, toBranchIndex) ?? {}
+          nextForm.formDataInput = substituteRecord(srcForm.formDataInput, fromBranchIndex, toBranchIndex)
+          nextForm.formDataView = substituteRecord(srcForm.formDataView, fromBranchIndex, toBranchIndex)
+          // Invalidate raw caches so generator re-serializes from the patched parsed form
+          nextForm._rawFormData = undefined
+          nextForm._rawFormDataInput = undefined
+          nextForm._rawFormDataView = undefined
+          nextForm._rawDecisionKey = undefined
+        }
+
+        if (src.type === 'decision_user' && next.type === 'decision_user') {
+          const srcD = src as DecisionUserStep
+          const nextD = next as DecisionUserStep
+          nextD.rule = substituteActor(srcD.rule, fromBranchIndex, toBranchIndex)
+          nextD.viewFields = substituteFields(srcD.viewFields, fromBranchIndex, toBranchIndex) ?? []
+          nextD.decisionKey = substituteRecord(srcD.decisionKey, fromBranchIndex, toBranchIndex) ?? {}
+          nextD._rawDecisionKey = undefined
+        }
+
+        if (src.type === 'decision_sistem' && next.type === 'decision_sistem') {
+          const srcS = src as DecisionSistemStep
+          const nextS = next as DecisionSistemStep
+          nextS.condition = {
+            variableA: substituteActor(srcS.condition.variableA, fromBranchIndex, toBranchIndex),
+            operator: srcS.condition.operator,
+            variableB: substituteActor(srcS.condition.variableB, fromBranchIndex, toBranchIndex),
+          }
+        }
+
+        patched.set(tgt.id, next as WorkflowStep)
+      }
+
+      if (patched.size === 0) return s
+
+      const newSteps = s.dsl.process.steps.map((st) => patched.get(st.id) ?? st)
+      const next: WorkflowDSL = { ...s.dsl, process: { ...s.dsl.process, steps: newSteps } }
+      const past = [...s._past, s.dsl].slice(-MAX_HISTORY)
+
+      report = { copiedSteps: patched.size }
+      return {
+        dsl: next,
+        _past: past,
+        _future: [],
+        canUndo: true,
+        canRedo: false,
+      }
+    })
+    return report
+  },
+
+  commitParallelBlockAnnotations: () => {
+    let count = 0
+    set((s) => {
+      if (!s.dsl) return s
+      const blocks = detectParallelBlocks(s.dsl)
+      count = blocks.length
+      const annotations = blocks.map((b) => ({
+        id: b.id,
+        forkStepNumber: b.forkStepNumber,
+        joinStepNumber: b.joinStepNumber,
+        branches: b.branches,
+        actors: b.actors,
+      }))
+      const next: WorkflowDSL = {
+        ...s.dsl,
+        process: { ...s.dsl.process, parallelBlocks: annotations },
+      }
+      const past = [...s._past, s.dsl].slice(-MAX_HISTORY)
+      return {
+        dsl: next,
+        _past: past,
+        _future: [],
+        canUndo: true,
+        canRedo: false,
+      }
+    })
+    return { count }
+  },
+
+  clearParallelBlockAnnotations: () =>
+    withHistory(set, (dsl) => {
+      if (!dsl.process.parallelBlocks) return null
+      const nextProcess = { ...dsl.process }
+      delete nextProcess.parallelBlocks
+      return { ...dsl, process: nextProcess }
+    }),
 }))

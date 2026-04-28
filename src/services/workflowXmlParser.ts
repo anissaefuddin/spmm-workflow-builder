@@ -37,7 +37,42 @@ import type {
   FormFieldMap,
   DecisionKeyMap,
   Operator,
+  ParallelBlockAnnotation,
 } from '../types/workflow'
+
+// Marker prefix used by the generator to persist parallel-block annotations
+// as an XML comment. Kept in sync with workflowXmlGenerator.ts.
+const PARALLEL_BLOCKS_MARKER = '@@parallelBlocks:'
+
+/**
+ * Walk the first level of children (+ the root's own child comments) looking
+ * for an annotation comment of the form `<!-- @@parallelBlocks: [...] -->`.
+ * Returns the parsed annotations or undefined when absent/malformed.
+ */
+function extractParallelBlocksAnnotation(
+  root: Element,
+  warnings: string[],
+): ParallelBlockAnnotation[] | undefined {
+  for (let i = 0; i < root.childNodes.length; i++) {
+    const node = root.childNodes[i]
+    if (node.nodeType !== Node.COMMENT_NODE) continue
+    const text = (node.nodeValue ?? '').trim()
+    if (!text.startsWith(PARALLEL_BLOCKS_MARKER)) continue
+    const payload = text.slice(PARALLEL_BLOCKS_MARKER.length).trim()
+    try {
+      const parsed = JSON.parse(payload)
+      if (!Array.isArray(parsed)) {
+        warnings.push(`parallelBlocks annotation is not an array — ignored`)
+        return undefined
+      }
+      return parsed as ParallelBlockAnnotation[]
+    } catch (e) {
+      warnings.push(`parallelBlocks annotation JSON invalid — ignored (${String(e)})`)
+      return undefined
+    }
+  }
+  return undefined
+}
 
 // ── Public result types ──────────────────────────────────────
 
@@ -527,10 +562,13 @@ export function parseXmlToJson(xml: string, options: ParseOptions = {}): ParseRe
   // Steps are kept in document order (not sorted by number) to preserve round-trip fidelity.
   // The engine resolves steps by number reference, so document order is irrelevant for execution.
 
+  const parallelBlocks = extractParallelBlocksAnnotation(root, warnings)
+
   const process: WorkflowProcess = {
     id: uuidv4(),
     name: options.processName ?? 'Untitled Workflow',
     roleStart, roles, listGrup, variables, steps,
+    ...(parallelBlocks ? { parallelBlocks } : {}),
   }
 
   validateReferences(process, warnings)

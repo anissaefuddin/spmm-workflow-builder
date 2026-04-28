@@ -86,6 +86,7 @@ export async function listTickets(params?: {
   page?: number
   size?: number
   status?: string
+  statusPengajuan?: string
   definitionId?: string
   search?: string
 }): Promise<ApiResult<{ content: TicketListItem[]; totalElements: number; page: number; size: number }>> {
@@ -93,10 +94,19 @@ export async function listTickets(params?: {
   if (params?.page !== undefined)  q.set('page', String(params.page))
   if (params?.size !== undefined)  q.set('size', String(params.size))
   if (params?.status)              q.set('status', params.status)
+  if (params?.statusPengajuan)     q.set('statusPengajuan', params.statusPengajuan)
   if (params?.definitionId)        q.set('definitionId', params.definitionId)
   if (params?.search)              q.set('search', params.search)
   const qs = q.toString()
   return apiGet(`/tickets${qs ? `?${qs}` : ''}`)
+}
+
+/** GET /status-pengajuan-values — distinct display-status labels in use */
+export async function listStatusPengajuanValues(
+  definitionId?: string,
+): Promise<ApiResult<string[]>> {
+  const qs = definitionId ? `?definitionId=${encodeURIComponent(definitionId)}` : ''
+  return apiGet(`/status-pengajuan-values${qs}`)
 }
 
 /** POST /ticket/update-status — update ticket status label */
@@ -253,6 +263,83 @@ export async function getFullRuntimeContext(noTiket: string): Promise<ApiResult<
 
 // ── Force transition + File resolver endpoints ─────────────
 
+// ── SPME timeline (logs + groups + per-task viewer access) ─
+
+export interface SpmeTimelineLog {
+  taskId: string
+  username: string | null
+  decision: string | null
+  notes: string | null
+  title: string | null
+  occurredAt: string | null
+}
+
+export interface SpmeTimelineGroup {
+  grup: string
+  urutan: number
+  status: boolean | null
+  lastUpdate: string | null
+}
+
+export interface SpmeTimelineTask {
+  taskId: string
+  step: string
+  title: string | null
+  type: string | null
+  role: string | null
+  status: number
+  statusTampil: string | null
+  claimBy: string | null
+  createdAt: string | null
+  completedAt: string | null
+  rawViewer: string | null
+  allowedRoles: string[]
+  unrestricted: boolean
+  allowed: boolean | null
+  reason: string
+}
+
+/**
+ * POST /spme-timeline
+ * Combined data source: task logs, phase groups, and per-task viewer access.
+ * Strict case-insensitive exact-token match against wf_task.view_acces_role
+ * (does NOT use the legacy substring contains() check).
+ */
+export async function getSpmeTimeline(params: {
+  noTiket: string
+  /** Optional. When supplied, every task gets `allowed`/`reason` populated. */
+  role?: string
+}): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  role: string | null
+  lastUpdate: number | null
+  logs: SpmeTimelineLog[]
+  groups: SpmeTimelineGroup[]
+  tasks: SpmeTimelineTask[]
+}>> {
+  return apiPost('/spme-timeline', {
+    noTiket: params.noTiket,
+    role:    params.role ?? '',
+  })
+}
+
+/** POST /release-claim — null out claim_by so the ticket re-opens for any allowed user */
+export async function releaseTaskClaim(params: {
+  noTiket: string
+  taskId: string
+  username?: string
+  notes?: string
+}): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  taskId: string
+  previousClaim: string
+  status: number
+}>> {
+  return apiPost('/release-claim', params)
+}
+
 /** POST /force-transition — admin override: jump to any step */
 export async function forceTransitionStep(params: {
   noTiket: string
@@ -276,4 +363,165 @@ export async function resolveFileUrl(path: string): Promise<ApiResult<{
   fileName: string; url: string; previewable: boolean
 }>> {
   return apiPost('/resolve-file', { path })
+}
+
+// ── Dynamic form (custom variable types) ──────────────────
+
+/**
+ * A single rendered cell — mirrors backend `FormKomponen`.
+ * `data` is either a scalar OR a `List<Record<string, FormKomponen>>` when tipe="list"
+ * (nested level-2 rows; level-3 rows live under a `level3` key inside each level-2 row).
+ */
+export interface FormKomponen {
+  data: unknown
+  tipe: string
+  filename: string | null
+  readonly: boolean
+}
+
+export type FormRow = Record<string, FormKomponen>
+
+/** POST /dynamic-form/get — fetch hierarchical form data for a custom vtype. */
+export async function getDynamicForm(params: {
+  classObject: string
+  noTiket: string
+  returnEmptyForm?: boolean
+}): Promise<ApiResult<FormRow[]>> {
+  return apiPost('/dynamic-form/get', {
+    classObject: params.classObject,
+    noTiket: params.noTiket,
+    returnEmptyForm: params.returnEmptyForm ?? true,
+  })
+}
+
+/** POST /dynamic-form/save — persist edited rows. Does not advance workflow. */
+export async function saveDynamicForm(params: {
+  classObject: string
+  noTiket: string
+  payload: FormRow[]
+}): Promise<ApiResult<{ ok: boolean; saved: FormRow[] }>> {
+  return apiPost('/dynamic-form/save', {
+    classObject: params.classObject,
+    noTiket: params.noTiket,
+    payload: params.payload,
+  })
+}
+
+// ── Task regeneration (latest XML → existing ticket) ───────
+
+/**
+ * POST /apply-task-fixes
+ * Granular fix-up: patches existing wf_task rows in place, optionally inserts
+ * missing steps, optionally removes orphaned ones, and optionally backfills
+ * variables introduced by the latest XML. Does NOT call EvalTask / advance
+ * the workflow.
+ */
+export async function applyTaskFixes(params: {
+  noTiket: string
+  patchFields?: boolean
+  addMissingSteps?: boolean
+  removeOrphanedTasks?: boolean
+  addMissingVariables?: boolean
+}): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  workflowName: string
+  oldVersion: number
+  newVersion: number
+  definitionRepointed: boolean
+  patchedTasks: number
+  patchedFields: number
+  addedSteps: number
+  removedSteps: number
+  addedVariables: number
+  patches: Array<{ step: string; taskId: string; fields: string[] }>
+}>> {
+  return apiPost('/apply-task-fixes', {
+    noTiket:             params.noTiket,
+    patchFields:         params.patchFields         ?? true,
+    addMissingSteps:     params.addMissingSteps     ?? true,
+    removeOrphanedTasks: params.removeOrphanedTasks ?? false,
+    addMissingVariables: params.addMissingVariables ?? true,
+  })
+}
+
+/** GET /tasks-diff/{noTiket} — field-by-field diff between wf_task and latest XML. */
+export interface FieldDiff {
+  field: string
+  xml: string
+  db: string
+}
+
+export interface StepDiff {
+  step: string
+  taskId: string
+  title: string
+  fields: FieldDiff[]
+}
+
+export async function getTasksDiff(noTiket: string): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  workflowName: string
+  currentVersion: number
+  latestVersion: number
+  comparedAgainst: string
+  totalStepsInXml: number
+  totalTasksInDb: number
+  inSync: boolean
+  missingInTasks: string[]
+  missingInXml: string[]
+  differingSteps: number
+  totalFieldDiffs: number
+  differences: StepDiff[]
+}>> {
+  return apiGet(`/tasks-diff/${encodeURIComponent(noTiket)}`)
+}
+
+/** GET /version-check/{noTiket} — compare ticket's definition vs latest. */
+export async function checkTicketVersion(noTiket: string): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  workflowName: string
+  currentDefinitionId: string
+  currentVersion: number
+  currentUpdatedAt: string | null
+  latestDefinitionId: string
+  latestVersion: number
+  latestUpdatedAt: string | null
+  outdated: boolean
+}>> {
+  return apiGet(`/version-check/${encodeURIComponent(noTiket)}`)
+}
+
+/**
+ * POST /regenerate-tasks
+ * Rebuilds wf_task rows for an existing ticket from the latest published
+ * version of its workflow definition. Runtime state (status, claim_by,
+ * completed_at, catatan) is preserved per step number. New variables in
+ * the latest XML are backfilled when addMissingVariables=true (default).
+ */
+export async function regenerateTasks(params: {
+  noTiket: string
+  addMissingVariables?: boolean
+}): Promise<ApiResult<{
+  ok: boolean
+  noTiket: string
+  oldDefinitionId: string
+  oldVersion: number
+  newDefinitionId: string
+  newVersion: number
+  alreadyLatest: boolean
+  regeneratedTasks: number
+  regeneratedDecisions: number
+  preservedActiveStep: string | null
+  addedSteps: string[]
+  removedSteps: string[]
+  newVariablesAdded: number
+  warnings: string[]
+}>> {
+  return apiPost('/regenerate-tasks', {
+    noTiket: params.noTiket,
+    addMissingVariables: params.addMissingVariables ?? true,
+  })
 }

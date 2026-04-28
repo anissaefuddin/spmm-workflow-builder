@@ -206,6 +206,20 @@ export interface ButtonMapEntry {
   stepInquiry?: string
 }
 
+// ── Parallel Block annotation (builder-only hint) ────────────
+// Persisted via an XML comment so the detector/visual layer can
+// remember user-confirmed groupings across round-trips. Ignored
+// by the spmm-be runtime (XML comments are discarded by its parser).
+export interface ParallelBlockAnnotation {
+  id: string                        // stable id, typically "pblock-<forkStepNumber>"
+  forkStepNumber: number
+  joinStepNumber: number | null
+  /** Step-number arrays per branch (index 0 = actor 1, index 1 = actor 2). */
+  branches: number[][]
+  /** Display labels for each branch, e.g. ["Asesor 1", "Asesor 2"]. */
+  actors: string[]
+}
+
 // ── Process (root) ────────────────────────────────────────────
 export interface WorkflowProcess {
   id: string
@@ -219,6 +233,9 @@ export interface WorkflowProcess {
   // ── Optional DB enrichment (NOT serialized to XML) ─────────
   roleConfig?: RoleConfigEntry[]    // from wf_role_matrix
   buttonMap?: ButtonMapEntry[]      // from wf_button_map
+
+  /** Confirmed parallel-block annotations. Emitted as XML comment on save. */
+  parallelBlocks?: ParallelBlockAnnotation[]
 }
 
 // ── Root DSL ──────────────────────────────────────────────────

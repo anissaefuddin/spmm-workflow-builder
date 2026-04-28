@@ -3,7 +3,9 @@
  * READ ONLY for most data; allows status update via safe adapter endpoint.
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { listTickets, monitorInstance, updateTicketStatus, transitionStep, forceTransitionStep, resolveFileUrl } from '../services/api'
+import { listTickets, monitorInstance, updateTicketStatus, transitionStep, forceTransitionStep, resolveFileUrl, regenerateTasks, listStatusPengajuanValues, checkTicketVersion, getTasksDiff, applyTaskFixes, releaseTaskClaim, getSpmeTimeline } from '../services/api'
+import type { SpmeTimelineTask } from '../services/api'
+import type { StepDiff } from '../services/api'
 import { useSettingsStore } from '../store/settings-store'
 import { useWorkflowListStore } from '../store/workflow-list-store'
 import type { TicketListItem } from '../types/monitoring-api'
@@ -11,6 +13,7 @@ import type { WfBuilderMonitorResponse, TaskHistoryItem, VariableSnapshot } from
 import { STATUS_COLORS, STATUS_LABELS } from '../types/monitoring-api'
 import { DebugTimeline } from '../components/monitoring/DebugTimeline'
 import { AdvancedMonitor } from '../components/monitoring/AdvancedMonitor'
+import { VariableFormEditor } from '../components/monitoring/VariableFormEditor'
 
 // ─────────────────────────────────────────────────────────────
 // Variable type badge colors (mirrors VariablePicker)
@@ -266,6 +269,7 @@ function TicketList({
   const [error, setError]         = useState<string | null>(null)
   const [search, setSearch]       = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+  const [statusGroups, setStatusGroups] = useState<string[]>([])
   const [page, setPage]           = useState(0)
   const [total, setTotal]         = useState(0)
 
@@ -301,7 +305,7 @@ function TicketList({
       page,
       size: PAGE_SIZE,
       search: search.trim() || undefined,
-      status: filterStatus || undefined,
+      statusPengajuan: filterStatus || undefined,
       definitionId: selectedDefId || undefined,
     })
     if (reqId.current !== thisId) return  // stale — a newer request is in flight
@@ -314,9 +318,21 @@ function TicketList({
     }
   }, [backendUrl, page, search, filterStatus, selectedDefId])
 
-  // Reset to page 0 when filters change
-  useEffect(() => { setPage(0) }, [selectedDefId])
+  // Reset to page 0 + clear status filter when the workflow changes
+  // (status labels are workflow-specific and likely stale across definitions)
+  useEffect(() => { setPage(0); setFilterStatus('') }, [selectedDefId])
   useEffect(() => { void load() }, [load])
+
+  // Refresh the status-group dropdown options whenever workflow filter changes
+  useEffect(() => {
+    if (!backendUrl) return
+    let cancelled = false
+    void listStatusPengajuanValues(selectedDefId || undefined).then((res) => {
+      if (cancelled) return
+      if (res.ok) setStatusGroups(res.data)
+    })
+    return () => { cancelled = true }
+  }, [backendUrl, selectedDefId])
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
@@ -385,9 +401,9 @@ function TicketList({
           className="w-full border border-gray-300 rounded px-2 py-1.5 text-xs"
         >
           <option value="">All statuses</option>
-          <option value="0">Active</option>
-          <option value="1">Completed</option>
-          <option value="2">Cancelled</option>
+          {statusGroups.map((sp) => (
+            <option key={sp} value={sp}>{sp}</option>
+          ))}
         </select>
       </div>
 
@@ -474,7 +490,11 @@ function TicketDetail({
   const [catatan, setCatatan]         = useState('')
   const [updating, setUpdating]       = useState(false)
   const [updateMsg, setUpdateMsg]     = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<'normal' | 'debug' | 'advanced'>('normal')
+  const [viewMode, setViewMode] = useState<'normal' | 'debug' | 'advanced' | 'form'>('normal')
+
+  // SPME timeline = logs + groups + per-task viewer access (one round-trip)
+  const [timelineTasks, setTimelineTasks] = useState<SpmeTimelineTask[]>([])
+  const [accessRole, setAccessRole]       = useState('')
 
   const loadDetail = useCallback(async () => {
     setLoading(true)
@@ -490,6 +510,17 @@ function TicketDetail({
       setData(null)
     }
   }, [ticket.processId, onHighlightStep])
+
+  // Fetch SPME timeline whenever ticket / role changes (passes role for access eval)
+  useEffect(() => {
+    if (!data?.noTiket) { setTimelineTasks([]); return }
+    let cancelled = false
+    void getSpmeTimeline({ noTiket: data.noTiket, role: accessRole.trim() || undefined }).then((r) => {
+      if (cancelled) return
+      setTimelineTasks(r.ok ? r.data.tasks : [])
+    })
+    return () => { cancelled = true }
+  }, [data?.noTiket, accessRole])
 
   useEffect(() => { void loadDetail() }, [loadDetail])
 
@@ -558,7 +589,7 @@ function TicketDetail({
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {(['normal', 'debug', 'advanced'] as const).map((mode) => (
+            {(['normal', 'form', 'debug', 'advanced'] as const).map((mode) => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}
@@ -566,10 +597,11 @@ function TicketDetail({
                   ${viewMode === mode
                     ? mode === 'advanced' ? 'bg-indigo-600 text-white border-indigo-700'
                     : mode === 'debug' ? 'bg-purple-600 text-white border-purple-700'
+                    : mode === 'form' ? 'bg-emerald-600 text-white border-emerald-700'
                     : 'bg-gray-600 text-white border-gray-700'
                     : 'text-gray-500 border-gray-200 hover:bg-gray-50'}`}
               >
-                {mode === 'normal' ? 'Normal' : mode === 'debug' ? 'Debug' : 'Advanced'}
+                {mode === 'normal' ? 'Normal' : mode === 'form' ? 'Form' : mode === 'debug' ? 'Debug' : 'Advanced'}
               </button>
             ))}
             <button
@@ -628,7 +660,10 @@ function TicketDetail({
           <ForceStepPanel data={data} onRefresh={loadDetail} />
         )}
 
-        {/* ── 4–5. Variables + Timeline (normal / debug / advanced) */}
+        {/* ── 3c. Workflow Version Check + Sync to Latest ─── */}
+        <WorkflowVersionPanel noTiket={data.noTiket} onRefresh={loadDetail} />
+
+        {/* ── 4–5. Variables + Timeline (normal / form / debug / advanced) */}
         {viewMode === 'advanced' ? (
           <AdvancedMonitor
             history={data.history}
@@ -642,13 +677,48 @@ function TicketDetail({
             variables={data.variables}
             activeStep={data.activeStepNumber}
           />
+        ) : viewMode === 'form' ? (
+          <VariableFormEditor
+            noTiket={data.noTiket}
+            variables={data.variables}
+            onSaved={loadDetail}
+          />
         ) : (
           <>
             <VariableViewer variables={data.variables} />
             {data.history.length > 0 && (
               <div>
-                <SectionHeader label="Timeline" count={data.history.length} />
-                <TimelineList history={data.history} activeStep={data.activeStepNumber} />
+                <div className="flex items-center gap-2 mb-2">
+                  <SectionHeader label="Timeline" count={data.history.length} />
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <label className="text-[10px] text-gray-500 font-medium uppercase tracking-wide" title="Evaluate per-step viewer access for this role">
+                      View as role
+                    </label>
+                    <input
+                      type="text"
+                      value={accessRole}
+                      onChange={(e) => setAccessRole(e.target.value.toUpperCase())}
+                      placeholder="e.g. AD"
+                      maxLength={8}
+                      className="w-16 border border-gray-300 rounded px-1.5 py-0.5 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    />
+                    {accessRole && (
+                      <button
+                        onClick={() => setAccessRole('')}
+                        className="text-[10px] text-gray-400 hover:text-red-500"
+                        title="Clear role"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <TimelineList
+                  history={data.history}
+                  activeStep={data.activeStepNumber}
+                  tasksByStep={Object.fromEntries(timelineTasks.map((t) => [String(t.step), t]))}
+                  role={accessRole.trim() || null}
+                />
               </div>
             )}
           </>
@@ -675,9 +745,13 @@ function StepTransitionPanel({
 }) {
   const [transitioning, setTransitioning] = useState(false)
   const [transitionMsg, setTransitionMsg] = useState<string | null>(null)
+  const [releasing, setReleasing]         = useState(false)
+  const [releaseMsg, setReleaseMsg]       = useState<string | null>(null)
+  const [showReleaseConfirm, setShowReleaseConfirm] = useState(false)
 
   // Find the active task from history
   const activeTask = data.history.find((h) => h.status === 'PENDING' && h.taskId)
+  const claimedBy  = activeTask?.claimBy?.trim() || null
 
   const handleTransition = async (action: 'true' | 'false' | 'save' | 'rollback') => {
     if (!activeTask?.taskId || !data.noTiket) return
@@ -697,6 +771,27 @@ function StepTransitionPanel({
       setTimeout(() => { setTransitionMsg(null); onRefresh() }, 1000)
     } else {
       setTransitionMsg(`Error: ${res.error}`)
+    }
+  }
+
+  const handleReleaseClaim = async () => {
+    if (!activeTask?.taskId || !data.noTiket) return
+    setShowReleaseConfirm(false)
+    setReleasing(true)
+    setReleaseMsg(null)
+    const res = await releaseTaskClaim({
+      noTiket: data.noTiket,
+      taskId: activeTask.taskId,
+      username: data.dibuatOleh?.split('|')[0] || 'builder',
+      notes: catatan.trim() || undefined,
+    })
+    setReleasing(false)
+    if (res.ok) {
+      setReleaseMsg(`Claim released (was: ${res.data.previousClaim})`)
+      setCatatan('')
+      setTimeout(() => { setReleaseMsg(null); onRefresh() }, 1200)
+    } else {
+      setReleaseMsg(`Error: ${res.error}`)
     }
   }
 
@@ -744,6 +839,59 @@ function StepTransitionPanel({
               {transitionMsg}
             </p>
           )}
+
+          {/* Release claim — only when current step is claimed */}
+          {claimedBy && (
+            <div className="mt-2 pt-2 border-t border-blue-200 flex items-center gap-2">
+              <span className="text-[11px] text-gray-600">
+                Claimed by <span className="font-mono font-medium text-gray-800">{claimedBy}</span>
+              </span>
+              <button
+                onClick={() => setShowReleaseConfirm(true)}
+                disabled={releasing || transitioning}
+                className="ml-auto text-[11px] px-2.5 py-1 border border-amber-300 text-amber-700 rounded hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+                title="Null out claim_by so the ticket re-opens for any allowed user"
+              >
+                {releasing ? 'Releasing…' : 'Release claim'}
+              </button>
+            </div>
+          )}
+          {releaseMsg && (
+            <p className={`text-xs mt-1.5 ${releaseMsg.startsWith('Error') ? 'text-red-600' : 'text-green-600'}`}>
+              {releaseMsg}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Release claim confirmation */}
+      {showReleaseConfirm && activeTask && claimedBy && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-8">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+            <h3 className="font-bold text-amber-800 text-sm mb-2">Release this claim?</h3>
+            <p className="text-xs text-gray-600 mb-1">
+              Step <span className="font-mono font-bold">#{activeTask.stepNumber} · {activeTask.stepTitle}</span>{' '}
+              is currently claimed by <span className="font-mono font-bold">{claimedBy}</span>.
+            </p>
+            <p className="text-xs text-gray-500 mb-3">
+              Releasing nulls out <span className="font-mono">claim_by</span> while keeping the step active —
+              the ticket re-opens so a different allowed user can pick it up. Workflow is not advanced.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowReleaseConfirm(false)}
+                className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReleaseClaim}
+                className="flex-1 px-3 py-1.5 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+              >
+                Release
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -900,6 +1048,592 @@ function ForceStepPanel({ data, onRefresh }: { data: WfBuilderMonitorResponse; o
 }
 
 // ─────────────────────────────────────────────────────────────
+// Workflow version check + sync to latest
+// ─────────────────────────────────────────────────────────────
+
+interface VersionInfo {
+  workflowName: string
+  currentVersion: number
+  latestVersion: number
+  outdated: boolean
+}
+
+interface DeepDiffResult {
+  inSync: boolean
+  totalStepsInXml: number
+  totalTasksInDb: number
+  missingInTasks: string[]
+  missingInXml: string[]
+  differingSteps: number
+  totalFieldDiffs: number
+  differences: StepDiff[]
+}
+
+function WorkflowVersionPanel({ noTiket, onRefresh }: { noTiket: string; onRefresh: () => void }) {
+  const [info, setInfo]             = useState<VersionInfo | null>(null)
+  const [checking, setChecking]     = useState(false)
+  const [checkErr, setCheckErr]     = useState<string | null>(null)
+  const [addMissingVars, setAddVars] = useState(true)
+  const [running, setRunning]       = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+  // Deep diff (field-by-field wf_task vs latest XML)
+  const [diff, setDiff]             = useState<DeepDiffResult | null>(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+  const [diffErr, setDiffErr]       = useState<string | null>(null)
+  const [diffOpen, setDiffOpen]     = useState(false)
+  const [syncResult, setSyncResult] = useState<{
+    ok: boolean
+    error?: string
+    oldVersion?: number
+    newVersion?: number
+    alreadyLatest?: boolean
+    regeneratedTasks?: number
+    preservedActiveStep?: string | null
+    addedSteps?: string[]
+    removedSteps?: string[]
+    newVariablesAdded?: number
+    warnings?: string[]
+  } | null>(null)
+
+  // Auto-check on mount + when ticket changes
+  const runCheck = useCallback(async () => {
+    setChecking(true)
+    setCheckErr(null)
+    setSyncResult(null)
+    const res = await checkTicketVersion(noTiket)
+    setChecking(false)
+    if (res.ok) {
+      setInfo({
+        workflowName:   res.data.workflowName,
+        currentVersion: res.data.currentVersion,
+        latestVersion:  res.data.latestVersion,
+        outdated:       res.data.outdated,
+      })
+    } else {
+      setInfo(null)
+      setCheckErr(res.error)
+    }
+  }, [noTiket])
+
+  useEffect(() => { void runCheck() }, [runCheck])
+
+  // Reset diff when ticket changes
+  useEffect(() => {
+    setDiff(null); setDiffErr(null); setDiffOpen(false)
+  }, [noTiket])
+
+  const runDiff = async () => {
+    setDiffLoading(true)
+    setDiffErr(null)
+    const res = await getTasksDiff(noTiket)
+    setDiffLoading(false)
+    if (res.ok) {
+      setDiff({
+        inSync:          res.data.inSync,
+        totalStepsInXml: res.data.totalStepsInXml,
+        totalTasksInDb:  res.data.totalTasksInDb,
+        missingInTasks:  res.data.missingInTasks,
+        missingInXml:    res.data.missingInXml,
+        differingSteps:  res.data.differingSteps,
+        totalFieldDiffs: res.data.totalFieldDiffs,
+        differences:     res.data.differences,
+      })
+      setDiffOpen(true)
+    } else {
+      setDiffErr(res.error)
+    }
+  }
+
+  const handleSync = async () => {
+    setShowConfirm(false)
+    setRunning(true)
+    setSyncResult(null)
+    const res = await regenerateTasks({ noTiket, addMissingVariables: addMissingVars })
+    setRunning(false)
+    if (res.ok) {
+      setSyncResult(res.data)
+      // Re-check version so the badge flips to "Up to date"
+      void runCheck()
+      // Invalidate the cached diff — caller can rerun if interested
+      setDiff(null); setDiffOpen(false)
+      setTimeout(onRefresh, 800)
+    } else {
+      setSyncResult({ ok: false, error: res.error })
+    }
+  }
+
+  // ── Compact summary row (always visible) ──
+  const summary = checking ? (
+    <span className="text-xs text-gray-400 italic">Checking version…</span>
+  ) : checkErr ? (
+    <span className="text-xs text-red-600">Check failed: {checkErr}</span>
+  ) : info ? (
+    info.outdated ? (
+      <span className="text-xs text-amber-700 font-medium">
+        Outdated · v{info.currentVersion} → v{info.latestVersion}
+      </span>
+    ) : (
+      <span className="text-xs text-green-700 font-medium">
+        Up to date · v{info.currentVersion}
+      </span>
+    )
+  ) : (
+    <span className="text-xs text-gray-400 italic">Unknown</span>
+  )
+
+  return (
+    <div className={`border rounded-lg overflow-hidden ${info?.outdated ? 'border-amber-300' : 'border-gray-200'}`}>
+      <div className={`flex items-center gap-2 px-3 py-2 ${info?.outdated ? 'bg-amber-50' : 'bg-gray-50'}`}>
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Workflow Version
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          {summary}
+          <button
+            onClick={runCheck}
+            disabled={checking}
+            className="text-[10px] text-blue-600 border border-blue-200 rounded px-1.5 py-0.5 hover:bg-blue-50 disabled:opacity-40"
+            title="Re-check version pointer"
+          >
+            {checking ? '…' : 'Check'}
+          </button>
+          <button
+            onClick={runDiff}
+            disabled={diffLoading}
+            className="text-[10px] text-indigo-600 border border-indigo-200 rounded px-1.5 py-0.5 hover:bg-indigo-50 disabled:opacity-40"
+            title="Field-by-field diff between wf_task and the latest XML"
+          >
+            {diffLoading ? '…' : 'Compare tasks vs XML'}
+          </button>
+        </div>
+      </div>
+
+      {/* Deep diff result */}
+      {(diffErr || diff) && (
+        <div className="px-3 py-2 bg-white border-t border-gray-100">
+          {diffErr && <p className="text-xs text-red-600">Error: {diffErr}</p>}
+          {diff && (
+            <DiffView
+              noTiket={noTiket}
+              diff={diff}
+              open={diffOpen}
+              onToggle={() => setDiffOpen((v) => !v)}
+              onApplied={() => {
+                // After applying fixes, refresh both the diff and the ticket detail
+                void runDiff()
+                void runCheck()
+                onRefresh()
+              }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Outdated → show sync action */}
+      {info?.outdated && (
+        <div className="px-3 pb-3 pt-2 bg-white space-y-2 border-t border-amber-100">
+          <p className="text-[11px] text-gray-600">
+            This ticket was started on <span className="font-mono font-semibold">v{info.currentVersion}</span> of{' '}
+            <span className="font-semibold">{info.workflowName}</span>. The latest published version is{' '}
+            <span className="font-mono font-semibold">v{info.latestVersion}</span>. Syncing rebuilds wf_task
+            rows from the latest XML while preserving the active step, completion timestamps, and notes.
+          </p>
+          <label className="flex items-center gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={addMissingVars}
+              onChange={(e) => setAddVars(e.target.checked)}
+              className="rounded"
+            />
+            Also backfill new variables introduced in v{info.latestVersion}
+          </label>
+          <button
+            onClick={() => setShowConfirm(true)}
+            disabled={running}
+            className="w-full px-3 py-1.5 text-xs bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            {running ? 'Syncing…' : `Sync to v${info.latestVersion}`}
+          </button>
+        </div>
+      )}
+
+      {/* Sync result */}
+      {syncResult && (
+        <div className="px-3 pb-3 bg-white">
+          {!syncResult.ok ? (
+            <p className="text-xs text-red-600">Error: {syncResult.error}</p>
+          ) : (
+            <div className="text-xs text-gray-700 bg-green-50 border border-green-200 rounded p-2 space-y-0.5">
+              <div className="font-semibold text-green-700">
+                {syncResult.alreadyLatest
+                  ? `Re-synced with current version (v${syncResult.newVersion})`
+                  : `Updated v${syncResult.oldVersion} → v${syncResult.newVersion}`}
+              </div>
+              <div>{syncResult.regeneratedTasks} tasks regenerated</div>
+              {syncResult.preservedActiveStep != null && (
+                <div>Preserved active step: <span className="font-mono">#{syncResult.preservedActiveStep}</span></div>
+              )}
+              {syncResult.addedSteps && syncResult.addedSteps.length > 0 && (
+                <div>Added steps: {syncResult.addedSteps.map((s) => `#${s}`).join(', ')}</div>
+              )}
+              {syncResult.removedSteps && syncResult.removedSteps.length > 0 && (
+                <div className="text-amber-700">Removed steps: {syncResult.removedSteps.map((s) => `#${s}`).join(', ')}</div>
+              )}
+              {!!syncResult.newVariablesAdded && syncResult.newVariablesAdded > 0 && (
+                <div>New variables added: {syncResult.newVariablesAdded}</div>
+              )}
+              {syncResult.warnings && syncResult.warnings.length > 0 && (
+                <ul className="list-disc list-inside text-amber-700 mt-1">
+                  {syncResult.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Confirm modal */}
+      {showConfirm && info && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-8">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+            <h3 className="font-bold text-amber-800 text-sm mb-2">
+              Sync to v{info.latestVersion}?
+            </h3>
+            <p className="text-xs text-gray-600 mb-1">
+              This will delete and rebuild all <span className="font-mono">wf_task</span> rows for
+              ticket <span className="font-mono font-bold">{noTiket}</span> using the v{info.latestVersion}{' '}
+              XML of <span className="font-semibold">{info.workflowName}</span>.
+            </p>
+            <p className="text-xs text-gray-500 mb-3">
+              Active step, completion timestamps, and notes are preserved per step number.
+              Process variables are not modified (new variables are inserted only if the option above is checked).
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSync}
+                className="flex-1 px-3 py-1.5 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+              >
+                Sync
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Diff view (deep field-by-field compare)
+// ─────────────────────────────────────────────────────────────
+
+function DiffView({
+  noTiket,
+  diff,
+  open,
+  onToggle,
+  onApplied,
+}: {
+  noTiket: string
+  diff: DeepDiffResult
+  open: boolean
+  onToggle: () => void
+  onApplied: () => void
+}) {
+  if (diff.inSync) {
+    return (
+      <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded p-2">
+        <span className="font-semibold">In sync ✓</span> — all{' '}
+        <span className="font-mono">{diff.totalTasksInDb}</span> wf_task rows match the latest XML
+        (<span className="font-mono">{diff.totalStepsInXml}</span> steps compared field-by-field).
+      </div>
+    )
+  }
+
+  return (
+    <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded">
+      <button
+        onClick={onToggle}
+        className="w-full text-left flex items-center gap-2 px-2 py-1.5 hover:bg-amber-100/60"
+      >
+        <span className="font-semibold">Drift detected</span>
+        <span className="text-amber-700">
+          · {diff.differingSteps} step{diff.differingSteps === 1 ? '' : 's'} with{' '}
+          {diff.totalFieldDiffs} field diff{diff.totalFieldDiffs === 1 ? '' : 's'}
+          {diff.missingInTasks.length > 0 && ` · ${diff.missingInTasks.length} missing in DB`}
+          {diff.missingInXml.length > 0 && ` · ${diff.missingInXml.length} no longer in XML`}
+        </span>
+        <span className="ml-auto">{open ? '▴' : '▾'}</span>
+      </button>
+
+      {open && (
+        <div className="px-2 pb-2 pt-1 space-y-2 border-t border-amber-200">
+          {diff.missingInTasks.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold text-amber-700 uppercase">
+                Steps in XML but missing in wf_task ({diff.missingInTasks.length})
+              </div>
+              <div className="text-[11px] font-mono">
+                {diff.missingInTasks.map((s) => `#${s}`).join(', ')}
+              </div>
+            </div>
+          )}
+          {diff.missingInXml.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold text-amber-700 uppercase">
+                wf_task rows for steps no longer in XML ({diff.missingInXml.length})
+              </div>
+              <div className="text-[11px] font-mono">
+                {diff.missingInXml.map((s) => `#${s}`).join(', ')}
+              </div>
+            </div>
+          )}
+          {diff.differences.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-semibold text-amber-700 uppercase">
+                Field differences
+              </div>
+              {diff.differences.map((sd) => (
+                <div key={sd.step} className="border border-amber-200 rounded bg-white p-2">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-[10px] font-mono bg-amber-600 text-white rounded px-1 py-0.5">
+                      #{sd.step}
+                    </span>
+                    <span className="text-xs font-medium text-gray-800 truncate">{sd.title}</span>
+                    <span className="text-[10px] text-gray-400 ml-auto font-mono">{sd.fields.length}</span>
+                  </div>
+                  <table className="w-full text-[11px]">
+                    <thead className="text-gray-400 text-left">
+                      <tr>
+                        <th className="font-medium pr-2">Field</th>
+                        <th className="font-medium pr-2">XML (latest)</th>
+                        <th className="font-medium">DB (current)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sd.fields.map((f) => (
+                        <tr key={f.field} className="align-top">
+                          <td className="font-mono pr-2 py-0.5 text-gray-600 whitespace-nowrap">{f.field}</td>
+                          <td className="pr-2 py-0.5 text-green-700 break-all">{f.xml || <em className="text-gray-300">empty</em>}</td>
+                          <td className="py-0.5 text-red-700 break-all">{f.db || <em className="text-gray-300">empty</em>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <ApplyFixesForm
+            noTiket={noTiket}
+            diff={diff}
+            onApplied={onApplied}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Apply fixes form (granular non-destructive sync)
+// ─────────────────────────────────────────────────────────────
+
+function ApplyFixesForm({
+  noTiket,
+  diff,
+  onApplied,
+}: {
+  noTiket: string
+  diff: DeepDiffResult
+  onApplied: () => void
+}) {
+  const hasFieldDiffs   = diff.differingSteps > 0
+  const hasMissingSteps = diff.missingInTasks.length > 0
+  const hasOrphanSteps  = diff.missingInXml.length > 0
+  // Variables backfill is always offered — the diff doesn't introspect
+  // wf_process_variable, so we let the backend do the idempotent insert.
+
+  const [patchFields, setPatchFields]                 = useState(hasFieldDiffs)
+  const [addMissingSteps, setAddMissingSteps]         = useState(hasMissingSteps)
+  const [removeOrphanedTasks, setRemoveOrphanedTasks] = useState(false)
+  const [addMissingVariables, setAddMissingVariables] = useState(true)
+  const [running, setRunning]   = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [result, setResult]     = useState<{
+    ok: boolean
+    error?: string
+    patchedTasks?: number
+    patchedFields?: number
+    addedSteps?: number
+    removedSteps?: number
+    addedVariables?: number
+    definitionRepointed?: boolean
+    oldVersion?: number
+    newVersion?: number
+  } | null>(null)
+
+  const nothingSelected =
+    !patchFields && !addMissingSteps && !removeOrphanedTasks && !addMissingVariables
+
+  const handleApply = async () => {
+    setShowConfirm(false)
+    setRunning(true)
+    setResult(null)
+    const res = await applyTaskFixes({
+      noTiket, patchFields, addMissingSteps, removeOrphanedTasks, addMissingVariables,
+    })
+    setRunning(false)
+    if (res.ok) {
+      setResult(res.data)
+      onApplied()
+    } else {
+      setResult({ ok: false, error: res.error })
+    }
+  }
+
+  return (
+    <div className="border border-indigo-200 rounded bg-indigo-50/40 p-2 space-y-2 mt-2">
+      <div className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide">
+        Apply fixes
+      </div>
+      <p className="text-[11px] text-gray-600">
+        Granular non-destructive sync. Each option independently writes only the changes needed.
+        Runtime state (status / claim_by / completed_at / catatan / created_at) is never touched.
+      </p>
+
+      <div className="grid grid-cols-1 gap-1.5">
+        <FixOption
+          checked={patchFields}
+          onChange={setPatchFields}
+          disabled={!hasFieldDiffs}
+          label="Patch differing fields in wf_task"
+          hint={hasFieldDiffs
+            ? `${diff.differingSteps} step${diff.differingSteps === 1 ? '' : 's'}, ${diff.totalFieldDiffs} field${diff.totalFieldDiffs === 1 ? '' : 's'}`
+            : 'no field differences'}
+        />
+        <FixOption
+          checked={addMissingSteps}
+          onChange={setAddMissingSteps}
+          disabled={!hasMissingSteps}
+          label="Add wf_task rows for steps missing in DB"
+          hint={hasMissingSteps
+            ? `would insert ${diff.missingInTasks.length}: ${diff.missingInTasks.map((s) => `#${s}`).join(', ')}`
+            : 'no missing steps'}
+        />
+        <FixOption
+          checked={removeOrphanedTasks}
+          onChange={setRemoveOrphanedTasks}
+          disabled={!hasOrphanSteps}
+          label="Delete wf_task rows for steps no longer in XML"
+          hint={hasOrphanSteps
+            ? `would delete ${diff.missingInXml.length}: ${diff.missingInXml.map((s) => `#${s}`).join(', ')}`
+            : 'no orphan steps'}
+          danger
+        />
+        <FixOption
+          checked={addMissingVariables}
+          onChange={setAddMissingVariables}
+          label="Create new wf_process_variable rows from XML"
+          hint="idempotent — never overwrites existing values"
+        />
+      </div>
+
+      <div className="flex items-center gap-2 pt-1 border-t border-indigo-100">
+        <span className="text-[11px] text-gray-500">
+          {nothingSelected
+            ? 'Nothing selected'
+            : 'Will write only the selected categories'}
+        </span>
+        <button
+          onClick={() => setShowConfirm(true)}
+          disabled={running || nothingSelected}
+          className="ml-auto text-xs px-3 py-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+        >
+          {running ? 'Applying…' : 'Apply Fixes'}
+        </button>
+      </div>
+
+      {result && !result.ok && (
+        <p className="text-xs text-red-600">Error: {result.error}</p>
+      )}
+      {result && result.ok && (
+        <div className="text-xs text-gray-700 bg-green-50 border border-green-200 rounded p-2 space-y-0.5">
+          <div className="font-semibold text-green-700">Fixes applied</div>
+          <div>{result.patchedTasks} task{result.patchedTasks === 1 ? '' : 's'} patched ({result.patchedFields} field{result.patchedFields === 1 ? '' : 's'})</div>
+          {!!result.addedSteps && <div>{result.addedSteps} new step{result.addedSteps === 1 ? '' : 's'} added</div>}
+          {!!result.removedSteps && <div className="text-amber-700">{result.removedSteps} orphan step{result.removedSteps === 1 ? '' : 's'} removed</div>}
+          {!!result.addedVariables && <div>{result.addedVariables} new variable{result.addedVariables === 1 ? '' : 's'} created</div>}
+          {result.definitionRepointed && (
+            <div>definition_id re-pointed to v{result.newVersion}</div>
+          )}
+        </div>
+      )}
+
+      {showConfirm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-8">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-5">
+            <h3 className="font-bold text-indigo-800 text-sm mb-2">Apply selected fixes?</h3>
+            <ul className="text-xs text-gray-600 mb-3 space-y-0.5 list-disc list-inside">
+              {patchFields           && <li>Patch differing fields on existing tasks</li>}
+              {addMissingSteps       && <li>Insert {diff.missingInTasks.length} new wf_task row{diff.missingInTasks.length === 1 ? '' : 's'}</li>}
+              {removeOrphanedTasks   && <li className="text-amber-700">Delete {diff.missingInXml.length} orphan wf_task row{diff.missingInXml.length === 1 ? '' : 's'}</li>}
+              {addMissingVariables   && <li>Create new wf_process_variable rows (idempotent)</li>}
+            </ul>
+            <p className="text-[11px] text-gray-500 mb-3">
+              Runtime state (status, claim_by, completed_at, catatan) and existing variable values
+              are not modified.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowConfirm(false)} className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50">
+                Cancel
+              </button>
+              <button onClick={handleApply} className="flex-1 px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700">
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FixOption({
+  checked, onChange, label, hint, disabled, danger,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  hint?: string
+  disabled?: boolean
+  danger?: boolean
+}) {
+  return (
+    <label className={`flex items-start gap-2 ${disabled ? 'opacity-40' : ''}`}>
+      <input
+        type="checkbox"
+        checked={checked && !disabled}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="rounded mt-0.5 shrink-0"
+      />
+      <div className="flex-1 min-w-0">
+        <div className={`text-xs ${danger ? 'text-amber-800' : 'text-gray-700'}`}>{label}</div>
+        {hint && <div className="text-[10px] text-gray-500">{hint}</div>}
+      </div>
+    </label>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
 // Not-started panel
 // ─────────────────────────────────────────────────────────────
 
@@ -929,7 +1663,14 @@ function NotStartedPanel({ data }: { data: WfBuilderMonitorResponse }) {
 // Timeline list
 // ─────────────────────────────────────────────────────────────
 
-function TimelineList({ history, activeStep }: { history: TaskHistoryItem[]; activeStep: number | null }) {
+function TimelineList({
+  history, activeStep, tasksByStep, role,
+}: {
+  history: TaskHistoryItem[]
+  activeStep: number | null
+  tasksByStep?: Record<string, SpmeTimelineTask>
+  role?: string | null
+}) {
   return (
     <div className="relative">
       <div className="absolute left-3 top-0 bottom-0 w-px bg-gray-200" />
@@ -939,6 +1680,7 @@ function TimelineList({ history, activeStep }: { history: TaskHistoryItem[]; act
           const isDone       = item.status === 'COMPLETED'
           const isCancelled  = item.status === 'CANCELLED'
           const isNotStarted = item.status === 'NOT_STARTED'
+          const access       = tasksByStep?.[String(item.stepNumber)]
           return (
             <div key={item.taskId ?? i} className="flex gap-3 relative">
               <div className={`
@@ -953,6 +1695,7 @@ function TimelineList({ history, activeStep }: { history: TaskHistoryItem[]; act
                 <div className="flex items-center gap-1">
                   <span className="text-xs font-mono text-gray-400">#{item.stepNumber}</span>
                   <span className="text-xs font-medium text-gray-800 truncate flex-1">{item.stepTitle}</span>
+                  {access && <ViewerBadge access={access} role={role} />}
                   <StatusBadge status={item.status} />
                 </div>
                 {item.role && <p className="text-xs text-gray-400">{item.role}</p>}
@@ -976,6 +1719,60 @@ function TimelineList({ history, activeStep }: { history: TaskHistoryItem[]; act
         })}
       </div>
     </div>
+  )
+}
+
+/**
+ * Renders a compact viewer-access pill for a step.
+ *  - unrestricted (no <viewer> set) → gray "open" with role list "—"
+ *  - role provided + allowed         → green eye + roles tooltip
+ *  - role provided + denied          → red lock + roles tooltip
+ *  - role NOT provided + restricted  → amber roles list (informational)
+ */
+function ViewerBadge({ access, role }: { access: SpmeTimelineTask; role: string | null | undefined }) {
+  const rolesText = access.allowedRoles.length > 0 ? access.allowedRoles.join(', ') : '—'
+
+  if (access.unrestricted) {
+    return (
+      <span
+        className="text-[9px] font-bold px-1 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0"
+        title="No <viewer> restriction — any role can view"
+      >
+        open
+      </span>
+    )
+  }
+
+  if (role && access.allowed === true) {
+    return (
+      <span
+        className="text-[9px] font-bold px-1 py-0.5 rounded bg-green-100 text-green-700 shrink-0"
+        title={`${role} ✓ — allowed roles: ${rolesText}`}
+      >
+        ✓ {role}
+      </span>
+    )
+  }
+
+  if (role && access.allowed === false) {
+    return (
+      <span
+        className="text-[9px] font-bold px-1 py-0.5 rounded bg-red-100 text-red-700 shrink-0"
+        title={`${role} ✗ — allowed roles: ${rolesText}`}
+      >
+        ✗ {role}
+      </span>
+    )
+  }
+
+  // Restricted but no role to evaluate against → just show the allowed roles
+  return (
+    <span
+      className="text-[9px] font-bold px-1 py-0.5 rounded bg-amber-100 text-amber-700 shrink-0 max-w-[140px] truncate"
+      title={`Restricted to: ${rolesText}`}
+    >
+      {rolesText}
+    </span>
   )
 }
 
